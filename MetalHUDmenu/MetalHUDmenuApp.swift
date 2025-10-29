@@ -21,7 +21,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Create the menu bar icon
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "speedometer", accessibilityDescription: "Metal HUD")
+            button.image = NSImage(systemSymbolName: "gamecontroller", accessibilityDescription: "Metal HUD")
             button.action = #selector(togglePopover)
         }
 

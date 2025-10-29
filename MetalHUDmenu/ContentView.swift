@@ -9,8 +9,8 @@ struct ContentView: View {
     @State private var hudEnabled = false
     @State private var selectedPreset: String? = nil
     @State private var selectedElements: Set<String> = []
-    @State private var scale: Double = 0.20
-    @State private var opacity: Double = 0.40
+    @State private var scale: Double = 0.30
+    @State private var opacity: Double = 1.00
     @State private var alignment: String = "topRight"
     @State private var statusMessage: String = ""
 
@@ -105,6 +105,28 @@ struct ContentView: View {
             // MARK: - Elements
             Text("Elements")
                 .font(.headline)
+
+            #if os(macOS)
+            // Always-visible vertical scroller on the right (macOS only)
+            AlwaysVisibleScrollView {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(allElements) { element in
+                        Toggle(element.label, isOn: Binding(
+                            get: { selectedElements.contains(element.key) },
+                            set: { newValue in
+                                if newValue { selectedElements.insert(element.key) }
+                                else { selectedElements.remove(element.key) }
+                            }
+                        ))
+                        .toggleStyle(.checkbox)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.trailing, 6) // keep content clear of the scroller
+            }
+            .frame(height: 180)
+            #else
+            // Fallback for non-macOS platforms (unchanged)
             ScrollView {
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(allElements) { element in
@@ -120,6 +142,7 @@ struct ContentView: View {
                 }
             }
             .frame(height: 180)
+            #endif
 
             Divider().padding(.vertical, 4)
 
@@ -218,3 +241,45 @@ struct ContentView: View {
         }
     }
 }
+
+#if os(macOS)
+import AppKit
+
+/// A SwiftUI wrapper around NSScrollView that keeps the vertical scroller
+/// always visible (no auto-hide) and pinned on the right.
+struct AlwaysVisibleScrollView<Content: View>: NSViewRepresentable {
+    private let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scroll = NSScrollView()
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = false
+        scroll.autohidesScrollers = false
+        scroll.scrollerStyle = .legacy // classic, always-visible style
+
+        let hosting = NSHostingView(rootView: content)
+        hosting.translatesAutoresizingMaskIntoConstraints = false
+        scroll.documentView = hosting
+
+        // Constrain content width to the visible area to avoid horizontal scrolling.
+        NSLayoutConstraint.activate([
+            hosting.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            hosting.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
+            hosting.topAnchor.constraint(equalTo: scroll.contentView.topAnchor)
+        ])
+
+        return scroll
+    }
+
+    func updateNSView(_ nsView: NSScrollView, context: Context) {
+        if let hosting = nsView.documentView as? NSHostingView<Content> {
+            hosting.rootView = content
+        }
+    }
+}
+#endif
