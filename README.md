@@ -27,3 +27,7 @@ A tiny macOS utility that configures Apple’s **Metal Performance HUD** system-
 5. Click **Apply**
 
 > Tip: HUD settings are applied via environment variables and affect **newly launched** processes.
+
+
+
+> All created with GPT5. 
