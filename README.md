@@ -1,6 +1,6 @@
 # MetalHUDmenu
 
-![App Screenshot](path/to/your-screenshot.png)
+![App Screenshot](pic.png)
 
 A tiny macOS utility that configures Apple’s **Metal Performance HUD** system-wide. Toggle the HUD, pick elements (FPS, GPU time, memory, etc.), set opacity/scale, and place it on screen—without having to triple-click the HUD in-game.
 
