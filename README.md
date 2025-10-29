@@ -26,7 +26,7 @@ A tiny macOS utility that configures Apple’s **Metal Performance HUD** system-
 4. Choose **Alignment**.
 5. Click **Apply**
 
-> Tip: HUD settings are applied via environment variables and affect **newly launched** processes.
+**Tip: HUD settings are applied via environment variables and affect **newly launched** processes.**
 
 
 
