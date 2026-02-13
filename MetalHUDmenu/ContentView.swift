@@ -6,13 +6,9 @@
 import SwiftUI
 
 struct ContentView: View {
-    @State private var hudEnabled = false
+    @ObservedObject var settings: HUDSettingsManager
+
     @State private var selectedPreset: String? = nil
-    @State private var selectedElements: Set<String> = []
-    @State private var scale: Double = 0.30
-    @State private var opacity: Double = 1.00
-    @State private var alignment: String = "topRight"
-    @State private var statusMessage: String = ""
 
     // MARK: - All known HUD elements
     struct HUDElement: Identifiable {
@@ -53,20 +49,13 @@ struct ContentView: View {
         let value: String
     }
 
-    // Updated alignment integer values based on observed plist exports.
-    // The integer values correspond to the actual positions as reported by macOS's HUD settings.
     private let alignments: [HUDAlignment] = [
-        // Top row
         .init(name: "Top Left", key: "topLeft", value: "10"),
         .init(name: "Top Center", key: "topCenter", value: "14"),
         .init(name: "Top Right", key: "topRight", value: "12"),
-
-        // Middle row (center)
         .init(name: "Center", key: "center", value: "30"),
         .init(name: "Left Center", key: "leftCenter", value: "26"),
         .init(name: "Center Right", key: "centerRight", value: "28"),
-
-        // Bottom row
         .init(name: "Bottom Right", key: "bottomRight", value: "20"),
         .init(name: "Bottom Center", key: "bottomCenter", value: "22"),
         .init(name: "Bottom Left", key: "bottomLeft", value: "18")
@@ -74,7 +63,7 @@ struct ContentView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Toggle("Enable Metal HUD", isOn: $hudEnabled)
+            Toggle("Enable Metal HUD", isOn: $settings.hudEnabled)
                 .toggleStyle(.switch)
                 .padding(.bottom, 8)
 
@@ -107,34 +96,32 @@ struct ContentView: View {
                 .font(.headline)
 
             #if os(macOS)
-            // Always-visible vertical scroller on the right (macOS only)
             AlwaysVisibleScrollView {
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(allElements) { element in
                         Toggle(element.label, isOn: Binding(
-                            get: { selectedElements.contains(element.key) },
+                            get: { settings.selectedElements.contains(element.key) },
                             set: { newValue in
-                                if newValue { selectedElements.insert(element.key) }
-                                else { selectedElements.remove(element.key) }
+                                if newValue { settings.selectedElements.insert(element.key) }
+                                else { settings.selectedElements.remove(element.key) }
                             }
                         ))
                         .toggleStyle(.checkbox)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.trailing, 6) // keep content clear of the scroller
+                .padding(.trailing, 6)
             }
             .frame(height: 180)
             #else
-            // Fallback for non-macOS platforms (unchanged)
             ScrollView {
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(allElements) { element in
                         Toggle(element.label, isOn: Binding(
-                            get: { selectedElements.contains(element.key) },
+                            get: { settings.selectedElements.contains(element.key) },
                             set: { newValue in
-                                if newValue { selectedElements.insert(element.key) }
-                                else { selectedElements.remove(element.key) }
+                                if newValue { settings.selectedElements.insert(element.key) }
+                                else { settings.selectedElements.remove(element.key) }
                             }
                         ))
                         .toggleStyle(.checkbox)
@@ -149,15 +136,15 @@ struct ContentView: View {
             // MARK: - Sliders and Alignment
             Group {
                 HStack {
-                    Text("Scale: \(String(format: "%.2f", scale))")
-                    Slider(value: $scale, in: 0.05...1.0, step: 0.01)
+                    Text("Scale: \(String(format: "%.2f", settings.scale))")
+                    Slider(value: $settings.scale, in: 0.05...1.0, step: 0.01)
                 }
                 HStack {
-                    Text("Opacity: \(Int(opacity * 100))%")
-                    Slider(value: $opacity, in: 0.1...1.0, step: 0.01)
+                    Text("Opacity: \(Int(settings.opacity * 100))%")
+                    Slider(value: $settings.opacity, in: 0.1...1.0, step: 0.01)
                 }
 
-                Picker("Location", selection: $alignment) {
+                Picker("Location", selection: $settings.alignment) {
                     ForEach(alignments) { a in
                         Text(a.name).tag(a.key)
                     }
@@ -167,17 +154,28 @@ struct ContentView: View {
 
             Divider().padding(.vertical, 4)
 
+            // MARK: - Launch settings
+            Toggle("Open at Login", isOn: $settings.openAtLogin)
+                .toggleStyle(.switch)
+
+            Toggle("Enable HUD on Boot", isOn: $settings.enableHUDOnBoot)
+                .toggleStyle(.switch)
+                .disabled(!settings.openAtLogin)
+                .foregroundStyle(settings.openAtLogin ? .primary : .secondary)
+
+            Divider().padding(.vertical, 4)
+
             // MARK: - Action buttons
             HStack {
-                Button("Apply") { applySettings() }
+                Button("Apply") { settings.applySettings() }
                     .buttonStyle(.borderedProminent)
-                Button("Disable HUD") { disableHUD() }
+                Button("Disable HUD") { settings.disableHUD() }
                 Spacer()
-                Button("Quit App") { quitApp() }
+                Button("Quit App") { NSApplication.shared.terminate(nil) }
             }
 
-            if !statusMessage.isEmpty {
-                Text(statusMessage)
+            if !settings.statusMessage.isEmpty {
+                Text(settings.statusMessage)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(.top, 4)
@@ -193,60 +191,15 @@ struct ContentView: View {
     private func presetButton(_ name: String, elements: [String]) -> some View {
         Button(name) {
             selectedPreset = name
-            selectedElements = Set(elements)
+            settings.selectedElements = Set(elements)
         }
         .buttonStyle(.borderless)
-    }
-
-    // MARK: - Apply/Disable HUD
-    private func applySettings() {
-        if hudEnabled {
-            runLaunchctl(["setenv", "MTL_HUD_ENABLED", "1"])
-            runLaunchctl(["setenv", "MTL_HUD_ELEMENTS", selectedElements.joined(separator: ",")])
-            runLaunchctl(["setenv", "MTL_HUD_OPACITY", String(format: "%.3f", opacity)])
-            runLaunchctl(["setenv", "MTL_HUD_SCALE", String(format: "%.3f", scale)])
-            runLaunchctl(["setenv", "MTL_HUD_ALIGNMENT", alignmentValue(for: alignment)])
-            statusMessage = "✅ Applied Metal HUD settings."
-        } else {
-            disableHUD()
-        }
-    }
-
-    private func disableHUD() {
-        runLaunchctl(["unsetenv", "MTL_HUD_ENABLED"])
-        statusMessage = "🚫 Disabled Metal HUD."
-    }
-
-    private func quitApp() {
-        NSApplication.shared.terminate(nil)
-    }
-
-    private func alignmentValue(for key: String) -> String {
-        alignments.first(where: { $0.key == key })?.value ?? "4"
-    }
-
-    private func runLaunchctl(_ args: [String]) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        process.arguments = ["asuser", "\(getuid())", "/bin/launchctl"] + args
-
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            print("Error running launchctl: \(error)")
-        }
     }
 }
 
 #if os(macOS)
 import AppKit
 
-/// A SwiftUI wrapper around NSScrollView that keeps the vertical scroller
-/// always visible (no auto-hide) and pinned on the right.
 struct AlwaysVisibleScrollView<Content: View>: NSViewRepresentable {
     private let content: Content
 
@@ -260,13 +213,12 @@ struct AlwaysVisibleScrollView<Content: View>: NSViewRepresentable {
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = false
         scroll.autohidesScrollers = false
-        scroll.scrollerStyle = .legacy // classic, always-visible style
+        scroll.scrollerStyle = .legacy
 
         let hosting = NSHostingView(rootView: content)
         hosting.translatesAutoresizingMaskIntoConstraints = false
         scroll.documentView = hosting
 
-        // Constrain content width to the visible area to avoid horizontal scrolling.
         NSLayoutConstraint.activate([
             hosting.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
             hosting.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
