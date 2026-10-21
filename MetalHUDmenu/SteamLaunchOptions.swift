@@ -33,11 +33,12 @@ enum SteamLaunchOptions {
     static func edit(localConfig text: String, appIDs: Set<String>?, _ transform: (String) -> String) -> String? {
         let bytes = Array(text.utf8)
         let appsPath = ["userlocalconfigstore", "software", "valve", "steam", "apps"]
-        struct App { var close = 0; var value: Range<Int>? }
+        struct App { var close = 0; var value: Range<Int>?; var keyQuote = 0 }
         var apps: [String: App] = [:]
         var appsClose: Int?
         var path: [String] = []
         var pendingKey: String?
+        var pendingKeyQuote = 0
         var i = 0
 
         func inApp() -> Bool { path.count == appsPath.count + 1 && Array(path.prefix(appsPath.count)) == appsPath }
@@ -55,8 +56,15 @@ enum SteamLaunchOptions {
                 guard i < bytes.count else { return nil }
                 let range = start..<i
                 i += 1
-                guard let key = pendingKey else { pendingKey = String(decoding: bytes[range], as: UTF8.self); continue }
-                if inApp() && key.lowercased() == "launchoptions" { apps[path.last!]?.value = range }
+                guard let key = pendingKey else {
+                    pendingKey = String(decoding: bytes[range], as: UTF8.self)
+                    pendingKeyQuote = start - 1
+                    continue
+                }
+                if inApp() && key.lowercased() == "launchoptions" {
+                    apps[path.last!]?.value = range
+                    apps[path.last!]?.keyQuote = pendingKeyQuote
+                }
                 pendingKey = nil
             case UInt8(ascii: "{"):
                 guard let key = pendingKey else { return nil }
@@ -85,7 +93,16 @@ enum SteamLaunchOptions {
             if let range = app.value {
                 let old = unescape(String(decoding: bytes[range], as: UTF8.self))
                 let new = transform(old)
-                if new != old { edits.append((range.lowerBound, range.count, escape(new))) }
+                if new == old { continue }
+                if new.isEmpty {
+                    // Drop the whole line instead of leaving an empty LaunchOptions behind.
+                    let start = lineStart(bytes, app.keyQuote)
+                    var end = range.upperBound + 1
+                    while end < bytes.count && bytes[end] != UInt8(ascii: "\n") { end += 1 }
+                    edits.append((start, min(end + 1, bytes.count) - start, ""))
+                } else {
+                    edits.append((range.lowerBound, range.count, escape(new)))
+                }
             } else if appIDs?.contains(id) == true {
                 let new = transform("")
                 if !new.isEmpty { edits.append((lineStart(bytes, app.close), 0, optionLine(new))) }
@@ -105,9 +122,9 @@ enum SteamLaunchOptions {
         return String(decoding: result, as: UTF8.self)
     }
 
-    /// Start of the line holding a closing brace, so inserted lines keep Steam's indentation.
-    private static func lineStart(_ bytes: [UInt8], _ brace: Int) -> Int {
-        var i = brace
+    /// Start of the line holding `position` (past its indentation tabs), so edits keep Steam's layout.
+    private static func lineStart(_ bytes: [UInt8], _ position: Int) -> Int {
+        var i = position
         while i > 0 && (bytes[i - 1] == UInt8(ascii: "\t") || bytes[i - 1] == UInt8(ascii: " ")) { i -= 1 }
         return i
     }

@@ -60,6 +60,8 @@ assert(SteamLaunchOptions.edit(localConfig: edited, appIDs: ["550", "367520", "1
 let undone = SteamLaunchOptions.edit(localConfig: edited, appIDs: nil, remove)!
 assert(undone.contains("\"LaunchOptions\"\t\t\"/usr/bin/env \\\"A=b c\\\" %command% -console\""), "undo restores the original options")
 assert(!undone.contains("mhud-run"), "undo removes every wrapper")
+assert(!undone.contains("\"LaunchOptions\"\t\t\"\""), "undo leaves no empty LaunchOptions lines")
+assert(undone.contains("\t\t\t\t\t\t\"LastPlayed\"\t\t\"1790000001\"\n\t\t\t\t\t}"), "undo restores an app that had no options")
 assert(SteamLaunchOptions.edit(localConfig: "\"a\" { b }", appIDs: nil, add) == nil, "unquoted tokens are refused")
 
 print("SteamLaunchOptions: all checks passed")
