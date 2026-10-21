@@ -9,6 +9,7 @@ struct ContentView: View {
     @ObservedObject var settings: HUDSettingsManager
 
     @State private var selectedPreset: String? = nil
+    @State private var tab = "HUD"
 
     // MARK: - All known HUD elements
     struct HUDElement: Identifiable {
@@ -62,6 +63,25 @@ struct ContentView: View {
     ]
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Picker("", selection: $tab) {
+                Text("HUD").tag("HUD")
+                Text("Mac Stats").tag("Mac Stats")
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
+            if tab == "Mac Stats" {
+                MacStatsView(settings: settings, helper: StatsHelper.shared)
+            } else {
+                hudTab
+            }
+        }
+        .padding(16)
+        .frame(width: 310)
+    }
+
+    private var hudTab: some View {
         VStack(alignment: .leading, spacing: 14) {
             Toggle("Enable Metal HUD", isOn: $settings.hudEnabled)
                 .toggleStyle(.switch)
@@ -183,8 +203,6 @@ struct ContentView: View {
 
             Spacer()
         }
-        .padding(16)
-        .frame(width: 310)
     }
 
     // MARK: - Preset Buttons

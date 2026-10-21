@@ -27,13 +27,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // Setup popover
-        popover.contentSize = NSSize(width: 320, height: 580)
+        popover.contentSize = NSSize(width: 320, height: 620)
         popover.behavior = .transient
         popover.contentViewController = NSViewController()
         popover.contentViewController?.view = NSHostingView(rootView: ContentView(settings: settings))
 
         // Auto-apply HUD settings on boot if enabled
         settings.applyOnBootIfNeeded()
+
+        // Mac stats: install files, watch Steam
+        StatsHelper.shared.start()
     }
 
     @objc func togglePopover() {

@@ -36,6 +36,30 @@ class HUDSettingsManager: ObservableObject {
         didSet { UserDefaults.standard.set(enableHUDOnBoot, forKey: "enableHUDOnBoot") }
     }
 
+    // MARK: - Mac stats (read live by libMHUDStats inside games)
+
+    /// Stat tokens and labels. Keep in sync with the names in NativeHUD/mhud_stats.mm.
+    static let systemStatCatalog: [(key: String, label: String)] = [
+        ("cpuusage", "CPU usage"), ("gpuusage", "GPU usage"),
+        ("cputemp", "CPU temperature"), ("gputemp", "GPU temperature"),
+        ("fans", "Fan speed"), ("systempower", "System power"),
+        ("cpupower", "CPU power (est.)"), ("gpupower", "GPU power"),
+        ("swap", "Swap used"), ("free", "Free RAM"),
+        ("inactive", "Free + inactive RAM"), ("thermal", "Thermal pressure")
+    ]
+
+    @Published var systemStats: Set<String> {
+        didSet { UserDefaults.standard.set(systemStats.sorted(), forKey: "systemStats") }
+    }
+
+    @Published var steamConnected: Bool {
+        didSet { UserDefaults.standard.set(steamConnected, forKey: "steamConnected") }
+    }
+
+    @Published var steamNeverAsk: Bool {
+        didSet { UserDefaults.standard.set(steamNeverAsk, forKey: "steamNeverAsk") }
+    }
+
     // MARK: - Open at Login
 
     @Published var openAtLogin: Bool {
@@ -78,6 +102,9 @@ class HUDSettingsManager: ObservableObject {
         self.alignment = defaults.string(forKey: "alignment") ?? "topRight"
         self.enableHUDOnBoot = defaults.object(forKey: "enableHUDOnBoot") as? Bool ?? false
         self.openAtLogin = SMAppService.mainApp.status == .enabled
+        self.systemStats = Set(defaults.stringArray(forKey: "systemStats") ?? [])
+        self.steamConnected = defaults.bool(forKey: "steamConnected")
+        self.steamNeverAsk = defaults.bool(forKey: "steamNeverAsk")
 
         if let saved = defaults.stringArray(forKey: "selectedElements") {
             self.selectedElements = Set(saved)

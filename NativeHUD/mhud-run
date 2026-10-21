@@ -1,0 +1,18 @@
+#!/bin/sh
+# MetalHUDmenu launch wrapper. Steam launch option:  "<path>/mhud-run" %command%
+# Adds the Mac stats library to the game and keeps Steam's own overlay libraries.
+lib="$(cd "$(dirname "$0")" && pwd)/libMHUDStats.dylib"
+log="$HOME/Library/Logs/MetalHUDmenu/mhud-run.log"
+mkdir -p "$(dirname "$log")"
+echo "$(date '+%F %T') $*" >> "$log"  # ponytail: launch log while we learn launcher quirks; drop once stable
+
+# macOS strips DYLD_* before /bin/sh runs, so Steam's overlay list survives only in its STEAM_ copy.
+base="${DYLD_INSERT_LIBRARIES:-$STEAM_DYLD_INSERT_LIBRARIES}"
+export DYLD_INSERT_LIBRARIES="${base:+$base:}$lib"
+# Compatibility tools (NotProton) rebuild the game's list from the STEAM_ copy, so add it there too.
+[ -n "$STEAM_DYLD_INSERT_LIBRARIES" ] && export STEAM_DYLD_INSERT_LIBRARIES="$STEAM_DYLD_INSERT_LIBRARIES:$lib"
+
+case "$1" in
+  *.app|*.app/) app="$1"; shift; exec /usr/bin/open -W -n --env DYLD_INSERT_LIBRARIES="$DYLD_INSERT_LIBRARIES" "$app" --args "$@" ;;
+  *) exec "$@" ;;
+esac

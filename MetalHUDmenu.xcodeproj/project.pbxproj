@@ -55,6 +55,7 @@
 				A33BB23C2EB03D760014ECD3 /* Sources */,
 				A33BB23D2EB03D760014ECD3 /* Frameworks */,
 				A33BB23E2EB03D760014ECD3 /* Resources */,
+				A3FAC0DE2EB1A00000000001 /* Build Mac Stats Library */,
 			);
 			buildRules = (
 			);
@@ -113,6 +114,37 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		A3FAC0DE2EB1A00000000001 /* Build Mac Stats Library */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/NativeHUD/build.sh",
+				"$(SRCROOT)/NativeHUD/mhud_stats.mm",
+				"$(SRCROOT)/NativeHUD/mhud-run",
+				"$(SRCROOT)/NativeHUD/stats/power.hpp",
+				"$(SRCROOT)/NativeHUD/stats/power_math.hpp",
+				"$(SRCROOT)/NativeHUD/stats/telemetry.hpp",
+				"$(SRCROOT)/NativeHUD/stats/usage.hpp",
+				"$(SRCROOT)/NativeHUD/stats/usage_math.hpp",
+			);
+			name = "Build Mac Stats Library";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/libMHUDStats.dylib",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/mhud-run",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"$SRCROOT/NativeHUD/build.sh\" \"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		A33BB23C2EB03D760014ECD3 /* Sources */ = {
