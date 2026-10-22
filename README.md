@@ -30,17 +30,40 @@ A tiny macOS utility that configures Apple’s **Metal Performance HUD** system-
 
 ## Mac Stats (beta)
 
-Adds live Mac readings to the HUD in games: CPU/GPU usage, CPU/GPU temperature, fan speed, power, memory and thermal pressure.
+Adds live Mac readings to the HUD in games: CPU/GPU usage and clocks, Neural Engine (ANE) usage, CPU/GPU temperature, fan speed, power, memory, memory pressure and thermal pressure.
 
-1. Open the **Mac Stats** tab and tick the stats you want. Games that are already running update within a second.
-2. Under **Steam**, click **Connect**. MetalHUDmenu adds itself to each installed game's launch options and keeps any options you already had. If Steam is open, it restarts once.
-3. Launch a Steam game with the HUD on. Your stats appear under **State Reporters → Mac Stats**.
+1. Open the **Mac Stats** tab, turn on **Enable Mac Stats**, and tick the stats you want. Games with the helper already loaded update within a second.
+2. Get the helper into the game one of three ways (all in the **Games** tab):
+   - **Launch Option:** copy it and paste it into the game's launch options in your launcher. Steam: right-click the game → Properties → Launch Options (`"…/mhud-run" %command%`). Heroic and similar launchers: paste the wrapper path into the game's wrapper command.
+   - **Pinned Apps:** pin a standalone app with **Pin App…**, or drop it on the menu bar icon or into the menu, and launch it from there.
+   - **NotProton / CrossOver:** connect the Wine runtime once (below).
+3. Launch the game with the HUD on. On macOS 27 your stats appear in the HUD's **Custom Metrics** section, lined up with Apple's rows. Temperatures turn yellow at 65 °C and red at 85 °C, and memory and thermal pressure show their level in color; everything else stays white. If a macOS update changes that private HUD feature, the stats fall back to **State Reporters → Mac Stats** (white, indented) until MetalHUDmenu is updated.
 
-- When Steam opens and isn't connected, MetalHUDmenu asks once with a notification. Choose **Don't Ask Again** or untick **Ask when Steam opens** to stop it.
-- New games are picked up each time Steam quits. Keep **Open at Login** on so this keeps working.
-- **Disconnect** removes MetalHUDmenu from every game's launch options. A backup of Steam's config is kept next to it as `localconfig.vdf.metalhudmenu-backup`.
-- Native Mac games through Steam are supported today. macOS 27 is recommended; macOS 26 support is experimental.
-- Some games refuse outside libraries and won't show stats.
+- Older versions added the wrapper to every Steam game automatically. If yours did, **Games → Launch Option → Remove** takes it back out of every game (Steam restarts once if open; a backup of Steam's config is kept next to it as `localconfig.vdf.metalhudmenu-backup`).
+- macOS 27 is recommended; macOS 26 support is experimental.
+- A GOG game from Heroic that quits or crashes a few seconds in (DREDGE does) may be fighting Heroic's GOG Galaxy stand-in, Comet, with or without Mac Stats. Turning off Heroic → Settings → Experimental → Comet support fixes it, at the cost of Galaxy features such as achievements for GOG games.
+- **Mac App Store apps are not supported.** Their signatures block outside libraries and can't be changed without breaking the app.
+- Some other games refuse outside libraries too; see the pin warning below.
+- **Sandboxed apps** (many emulators) can't read the sensors or MetalHUDmenu's settings. Keep MetalHUDmenu open: while a game's HUD is up, the app reads the sensors and hands the numbers to the game.
+- **GPU usage** is the share of time the GPU is busy at any speed (the same as mactop). macmon's default view scales that by clock / max clock, and Stats reads a driver value that drops to 0 at light load, so both read much lower while a game keeps the GPU at a low clock. Add **GPU clock** to see that speed.
+- **CPU temperature** is the hottest CPU core and **GPU temperature** the hottest GPU cluster, matching TG Pro on an M4 Max. Other chips show the average of the CPU sensors until their core sensors are verified.
+- **ANE usage** is estimated from the Neural Engine's memory-bandwidth requests; its energy counter reads 0 on macOS 27. MetalFX upscaling is expected to run on the GPU, so ANE usage near 0 in a MetalFX game is plausible; the row lets you check.
+
+### NotProton and CrossOver
+
+- **NotProton** appears only when its app and a runtime are installed. One runtime folder can serve **both ARM64/FEX and Rosetta**; the folder's `-fex` name does not mean Rosetta is missing.
+- **CrossOver → Add App…** selects a CrossOver app anywhere on disk. Connect verifies its exact build, backs up the originals, and adds the helper to its Wine Mac graphics driver. One connection covers all bottles using that runtime; there is no per-bottle setup.
+- Current verified profiles: CrossOver **26.3.0.39832**, Preview **27.0.0.41073**, and NotProton's modified **27.0.0.41073** runner. Other builds are refused, not patched blindly.
+- **Restore** puts the original driver files back. Quit affected games first. Standalone backups live under `~/Library/Application Support/MetalHUDmenu/RuntimeBackups`; NotProton backups remain inside its runtime's `.metalhudmenu-backup` folder.
+- Modifying a standalone CrossOver app invalidates its outer resource signature until restored. The app warns before connecting. Loader signatures/entitlements are not changed; no blanket re-signing is performed. These standalone paths have passed staging/recovery tests, but still need in-game validation before a broad release claim.
+
+### Pinned Apps
+
+- **Games → Pin App…** selects a standalone Mac app or executable. Launch it from the menu-bar popover with the current HUD settings and stats helper. The pin's menu edits its name and literal arguments (one per line), or removes the pin without deleting the game.
+- A warning triangle on a pin means the app's signature blocks libraries added at launch (hardened runtime without the DYLD and library-validation exceptions; Dolphin and DREDGE, for example). Mac App Store apps (DREDGE, for example) are not supported: they carry permissions only Apple's signature can grant, so they show a grey warning and are never re-signed. For other apps, **Allow Mac Stats…** in the pin's menu re-signs that app on this Mac with its own entitlements plus those two, after keeping an APFS clone under `~/Library/Application Support/MetalHUDmenu/SignatureBackups`. The app then no longer carries its developer's signature, macOS may ask you to approve it once, and an app update undoes the change. **Restore Original Signature** swaps the backup back and moves the re-signed copy to the Trash; it refuses if the app changed since (an update). If macOS blocks the change, allow MetalHUDmenu under Privacy & Security → App Management.
+- Quit an already-running app before launching through its pin. Opening the game normally does not apply the pin's launch environment. Protected apps may reject helper injection; no app-signing protections are disabled.
+
+The Mac Stats master toggle stops reporting without forgetting selected rows. Restart with it off for a clean launch without our reporter; a game started with it off may need restarting after enabling. Removing the Steam launch option does not disable an independently connected Wine runtime or unload a helper from an already-running game.
 
 
 

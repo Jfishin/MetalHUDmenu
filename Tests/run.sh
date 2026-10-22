@@ -1,8 +1,15 @@
 #!/bin/zsh
-# Compiles the Foundation-only sources with the checks in Tests/main.swift and runs them.
+# Compiles the Foundation-only sources and the stats math with their checks and runs them.
 set -euo pipefail
 cd "${0:A:h}/.."
 export DEVELOPER_DIR=${DEVELOPER_DIR:-/Applications/Xcode-beta.app/Contents/Developer}
-out=$(mktemp -d)/checks
-xcrun swiftc -Onone MetalHUDmenu/SteamLaunchOptions.swift Tests/main.swift -o "$out"
-"$out"
+scratch=$(mktemp -d)
+trap 'rm -rf "$scratch"' EXIT
+xcrun swiftc -module-cache-path "$scratch/modules" -Onone MetalHUDmenu/SteamLaunchOptions.swift MetalHUDmenu/WineRuntimePatch.swift Tests/main.swift -o "$scratch/core"
+"$scratch/core"
+xcrun swiftc -module-cache-path "$scratch/modules" -Onone MetalHUDmenu/LaunchConnection.swift Tests/general-connections.swift -o "$scratch/general"
+"$scratch/general"
+xcrun swiftc -module-cache-path "$scratch/modules" -Onone MetalHUDmenu/AppSignature.swift Tests/app-signature.swift -o "$scratch/signature"
+"$scratch/signature"
+xcrun clang++ -std=c++17 Tests/stats-math.cpp -o "$scratch/stats-math"
+"$scratch/stats-math"

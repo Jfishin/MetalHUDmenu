@@ -2,24 +2,44 @@
 //  StatsHelper.swift
 //  MetalHUDMenu
 //
-//  Keeps the Mac stats files installed and connects Steam games to them.
+//  Keeps the Mac stats files installed, publishes readings for sandboxed games, and patches Wine runtimes.
 //  Runs while MetalHUDmenu is open (Open at Login keeps it set-and-forget).
 //
 
 import AppKit
 import Combine
-import UserNotifications
+import UniformTypeIdentifiers
 
-final class StatsHelper: NSObject, ObservableObject, UNUserNotificationCenterDelegate {
+final class StatsHelper: NSObject, ObservableObject {
     static let shared = StatsHelper()
     static let steamID = "com.valvesoftware.steam"
     /// Stable location for files games load, so games keep launching if the app moves.
     static let supportDir = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/MetalHUDmenu")
     static var wrapper: URL { supportDir.appendingPathComponent("mhud-run") }
+    static var library: URL { supportDir.appendingPathComponent("libMHUDStats.dylib") }
+
+    struct Stat: Identifiable { let id: String, label: String, group: String }
+
+    /// The bundled stats library, loaded into this app to list the stats and to publish readings.
+    private static let bundledLibrary = Bundle.main.url(forResource: "libMHUDStats", withExtension: "dylib")
+        .flatMap { dlopen($0.path, RTLD_NOW) }
+
+    /// Every stat the library can show, in menu order. The library owns this list.
+    static let catalog: [Stat] = {
+        guard let symbol = bundledLibrary.flatMap({ dlsym($0, "mhud_catalog") }) else { return [] }
+        let text = String(cString: unsafeBitCast(symbol, to: (@convention(c) () -> UnsafePointer<CChar>).self)())
+        return text.split(separator: "\n").compactMap { line in
+            let fields = line.split(separator: "\t").map(String.init)
+            return fields.count == 3 ? Stat(id: fields[0], label: fields[1], group: fields[2]) : nil
+        }
+    }()
 
     @Published var steamStatus = ""
     @Published var busy = false
+    @Published var wineRuntimes: [URL] = []
+    @Published var connectedRunners: Set<String> = []
+    @Published var runtimeStatus = ""
 
     private let settings = HUDSettingsManager.shared
     private var relaunchSteam = false
@@ -28,46 +48,100 @@ final class StatsHelper: NSObject, ObservableObject, UNUserNotificationCenterDel
     }
 
     func start() {
-        installFiles()
-        let workspace = NSWorkspace.shared.notificationCenter
-        workspace.addObserver(self, selector: #selector(appLaunched), name: NSWorkspace.didLaunchApplicationNotification, object: nil)
-        workspace.addObserver(self, selector: #selector(appTerminated), name: NSWorkspace.didTerminateApplicationNotification, object: nil)
+        // Sandboxed games can read neither the sensors nor our preferences. While any game's helper
+        // pings, the library samples here and publishes readings those games can read.
+        if let symbol = Self.bundledLibrary.flatMap({ dlsym($0, "mhud_publisher_start") }) {
+            unsafeBitCast(symbol, to: (@convention(c) () -> Void).self)()
+        }
+        guard installFiles() else { return }
+        refreshRunners()
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(appTerminated),
+                                                          name: NSWorkspace.didTerminateApplicationNotification, object: nil)
+    }
 
-        let center = UNUserNotificationCenter.current()
-        center.delegate = self
-        center.setNotificationCategories([UNNotificationCategory(
-            identifier: "steam",
-            actions: [UNNotificationAction(identifier: "connect", title: "Connect"),
-                      UNNotificationAction(identifier: "never", title: "Don't Ask Again")],
-            intentIdentifiers: [])])
+    // MARK: - CrossOver
 
-        if runningSteam == nil { syncSteam() } else { updateStatus() }
+    func refreshRunners() {
+        let apps = (UserDefaults.standard.stringArray(forKey: "crossOverApplications") ?? []).map { URL(fileURLWithPath: $0) }
+        wineRuntimes = WineRuntimePatch.availableRunners(selectedApplications: apps)
+        connectedRunners = Set(wineRuntimes.filter { WineRuntimePatch.isConnected($0) }.map(\.path))
+    }
+
+    func setRunner(_ root: URL, connected: Bool) {
+        if connected && WineRuntimePatch.isStandalone(root) {
+            let alert = NSAlert()
+            alert.messageText = "Modify this CrossOver runtime?"
+            alert.informativeText = "This enables Mac Stats for all bottles using this app. It changes signed app contents, so macOS or CrossOver may reject the modified app. Disconnect restores the original libraries; backups stay outside the app. No loader entitlements are changed. Quit this CrossOver app and its games before connecting or disconnecting."
+            alert.addButton(withTitle: "Connect Runtime")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        guard !connected || installFiles() else { return }
+        do {
+            if connected { try WineRuntimePatch.connect(root, helper: Self.library) }
+            else { try WineRuntimePatch.disconnect(root) }
+            runtimeStatus = connected ? "Runtime patched. Restart its games to load Mac Stats; in-game loading must still be checked."
+                : "Original Wine libraries restored. Restart games for this change."
+        } catch { runtimeStatus = error.localizedDescription }
+        refreshRunners()
+    }
+
+    func addCrossOver() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose a CrossOver application"
+        panel.allowedContentTypes = [.applicationBundle]
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = URL(fileURLWithPath: "/Applications")
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let root = try WineRuntimePatch.runtimeRoot(forApplication: url)
+            let app = root.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            let paths = Set((UserDefaults.standard.stringArray(forKey: "crossOverApplications") ?? []) + [app.path])
+            UserDefaults.standard.set(paths.sorted(), forKey: "crossOverApplications")
+            refreshRunners()
+            runtimeStatus = "Added \(app.deletingPathExtension().lastPathComponent). Connect checks its exact runtime version before modifying it."
+        } catch { runtimeStatus = error.localizedDescription }
     }
 
     // MARK: - Files
 
     /// Copies the stats library and wrapper out of the app bundle when they changed.
-    func installFiles() {
-        guard let resources = Bundle.main.resourceURL else { return }
+    @discardableResult func installFiles() -> Bool {
+        guard let resources = Bundle.main.resourceURL else { return false }
         let fm = FileManager.default
-        try? fm.createDirectory(at: Self.supportDir, withIntermediateDirectories: true)
-        for name in ["libMHUDStats.dylib", "mhud-run"] {
-            let source = resources.appendingPathComponent(name), target = Self.supportDir.appendingPathComponent(name)
-            guard let data = try? Data(contentsOf: source) else { continue }
-            if (try? Data(contentsOf: target)) == data { continue }
-            // Remove first so running games keep their mapped copy instead of seeing it rewritten.
-            try? fm.removeItem(at: target)
-            try? fm.copyItem(at: source, to: target)
+        do {
+            try fm.createDirectory(at: Self.supportDir, withIntermediateDirectories: true)
+            for name in ["libMHUDStats.dylib", "mhud-run"] {
+                let source = resources.appendingPathComponent(name), target = Self.supportDir.appendingPathComponent(name)
+                let data = try Data(contentsOf: source)
+                if (try? Data(contentsOf: target)) == data { continue }
+                // Rename a completed sibling over the destination. Mapped games keep
+                // their inode, and a failed copy never leaves the installed path absent.
+                let staged = Self.supportDir.appendingPathComponent(".\(name).\(UUID().uuidString)")
+                defer { try? fm.removeItem(at: staged) }
+                try data.write(to: staged, options: .withoutOverwriting)
+                try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: staged.path)
+                guard rename(staged.path, target.path) == 0 else {
+                    throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+                }
+            }
+            return true
+        } catch {
+            let message = "Could not install Mac Stats: \(error.localizedDescription)"
+            steamStatus = message
+            runtimeStatus = message
+            return false
         }
     }
 
-    // MARK: - Steam
+    // MARK: - Steam (cleanup only)
 
-    /// Connect or disconnect Steam games. Steam must be closed to edit its config, so a running Steam restarts once.
-    func setSteamConnected(_ connected: Bool) {
-        settings.steamConnected = connected
-        installFiles()
-        guard let steam = runningSteam else { syncSteam(); return }
+    /// Older versions added the wrapper to every installed Steam game. Steam rewrites its config
+    /// when it quits, so a running Steam restarts once.
+    func removeFromSteam() {
+        guard let steam = runningSteam else { finishSteamRemoval(); return }
         busy = true
         relaunchSteam = true
         steamStatus = "Restarting Steam…"
@@ -76,69 +150,29 @@ final class StatsHelper: NSObject, ObservableObject, UNUserNotificationCenterDel
             guard let self, self.relaunchSteam, self.runningSteam != nil else { return }
             self.relaunchSteam = false
             self.busy = false
-            self.steamStatus = "Steam didn't quit. Quit Steam and the change applies then."
+            self.steamStatus = "Steam didn't quit. Quit Steam, then press Remove again."
         }
     }
 
-    func syncSteam() {
+    private func finishSteamRemoval() {
         do {
-            try SteamFiles.sync(wrapper: Self.wrapper.path, connected: settings.steamConnected)
-            updateStatus()
+            try SteamFiles.removeWrapper(Self.wrapper.path)
+            settings.steamConnected = false
+            steamStatus = "Removed from your Steam games. Paste the launch option into the games you want."
         } catch {
             steamStatus = "Couldn't update Steam: \(error.localizedDescription)"
         }
     }
 
-    private func updateStatus() {
-        steamStatus = settings.steamConnected ? "Connected. Steam games start with your stats." : "Not connected."
-    }
-
-    private func isSteam(_ note: Notification) -> Bool {
-        (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.bundleIdentifier == Self.steamID
-    }
-
     @objc private func appTerminated(_ note: Notification) {
-        guard isSteam(note) else { return }
-        // Steam writes its config on quit, so this is the safe moment. It also picks up newly installed games.
-        syncSteam()
-        if relaunchSteam, let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: Self.steamID) {
-            relaunchSteam = false
+        guard relaunchSteam,
+              (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.bundleIdentifier == Self.steamID
+        else { return }
+        relaunchSteam = false
+        finishSteamRemoval()
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: Self.steamID) {
             NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
         }
         busy = false
-    }
-
-    @objc private func appLaunched(_ note: Notification) {
-        guard isSteam(note), !relaunchSteam, !settings.steamConnected, !settings.steamNeverAsk,
-              !settings.systemStats.isEmpty else { return }
-        let center = UNUserNotificationCenter.current()
-        center.requestAuthorization(options: [.alert]) { granted, _ in
-            guard granted else { return }
-            let content = UNMutableNotificationContent()
-            content.title = "Show Mac stats in Steam games?"
-            content.body = "MetalHUDmenu can add your selected stats to the HUD in Steam games. Steam restarts once."
-            content.categoryIdentifier = "steam"
-            center.add(UNNotificationRequest(identifier: "steam-connect", content: content, trigger: nil))
-        }
-    }
-
-    // MARK: - Notification actions
-
-    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
-                                            withCompletionHandler completionHandler: @escaping () -> Void) {
-        let action = response.actionIdentifier
-        Task { @MainActor in
-            switch action {
-            case "connect": self.setSteamConnected(true)
-            case "never": self.settings.steamNeverAsk = true
-            default: break // dismissed or clicked: ask again next time Steam opens
-            }
-            completionHandler()
-        }
-    }
-
-    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
-                                            withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
-        completionHandler([.banner])
     }
 }

@@ -36,28 +36,19 @@ class HUDSettingsManager: ObservableObject {
         didSet { UserDefaults.standard.set(enableHUDOnBoot, forKey: "enableHUDOnBoot") }
     }
 
-    // MARK: - Mac stats (read live by libMHUDStats inside games)
+    // MARK: - Mac stats (read live by libMHUDStats; the stat list is StatsHelper.catalog)
 
-    /// Stat tokens and labels. Keep in sync with the names in NativeHUD/mhud_stats.mm.
-    static let systemStatCatalog: [(key: String, label: String)] = [
-        ("cpuusage", "CPU usage"), ("gpuusage", "GPU usage"),
-        ("cputemp", "CPU temperature"), ("gputemp", "GPU temperature"),
-        ("fans", "Fan speed"), ("systempower", "System power"),
-        ("cpupower", "CPU power (est.)"), ("gpupower", "GPU power"),
-        ("swap", "Swap used"), ("free", "Free RAM"),
-        ("inactive", "Free + inactive RAM"), ("thermal", "Thermal pressure")
-    ]
+    @Published var systemStatsEnabled: Bool {
+        didSet { UserDefaults.standard.set(systemStatsEnabled, forKey: "systemStatsEnabled") }
+    }
 
     @Published var systemStats: Set<String> {
         didSet { UserDefaults.standard.set(systemStats.sorted(), forKey: "systemStats") }
     }
 
+    /// True when an older version added the wrapper to every Steam game; cleared once it's removed.
     @Published var steamConnected: Bool {
         didSet { UserDefaults.standard.set(steamConnected, forKey: "steamConnected") }
-    }
-
-    @Published var steamNeverAsk: Bool {
-        didSet { UserDefaults.standard.set(steamNeverAsk, forKey: "steamNeverAsk") }
     }
 
     // MARK: - Open at Login
@@ -73,22 +64,12 @@ class HUDSettingsManager: ObservableObject {
         }
     }
 
-    // MARK: - Status message (not persisted)
+    // MARK: - Alignments (MTL_HUD_ALIGNMENT values), in screen order
 
-    @Published var statusMessage: String = ""
-
-    // MARK: - Alignment lookup table
-
-    private let alignmentMap: [String: String] = [
-        "topLeft": "10",
-        "topCenter": "14",
-        "topRight": "12",
-        "center": "30",
-        "leftCenter": "26",
-        "centerRight": "28",
-        "bottomRight": "20",
-        "bottomCenter": "22",
-        "bottomLeft": "18"
+    static let alignments: [(key: String, name: String, value: String)] = [
+        ("topLeft", "Top Left", "10"), ("topCenter", "Top Center", "14"), ("topRight", "Top Right", "12"),
+        ("leftCenter", "Left Center", "26"), ("center", "Center", "30"), ("centerRight", "Center Right", "28"),
+        ("bottomLeft", "Bottom Left", "18"), ("bottomCenter", "Bottom Center", "22"), ("bottomRight", "Bottom Right", "20")
     ]
 
     // MARK: - Init
@@ -102,9 +83,9 @@ class HUDSettingsManager: ObservableObject {
         self.alignment = defaults.string(forKey: "alignment") ?? "topRight"
         self.enableHUDOnBoot = defaults.object(forKey: "enableHUDOnBoot") as? Bool ?? false
         self.openAtLogin = SMAppService.mainApp.status == .enabled
+        self.systemStatsEnabled = defaults.object(forKey: "systemStatsEnabled") as? Bool ?? true
         self.systemStats = Set(defaults.stringArray(forKey: "systemStats") ?? [])
         self.steamConnected = defaults.bool(forKey: "steamConnected")
-        self.steamNeverAsk = defaults.bool(forKey: "steamNeverAsk")
 
         if let saved = defaults.stringArray(forKey: "selectedElements") {
             self.selectedElements = Set(saved)
@@ -117,12 +98,12 @@ class HUDSettingsManager: ObservableObject {
 
     func applySettings() {
         if hudEnabled {
-            runLaunchctl(["setenv", "MTL_HUD_ENABLED", "1"])
-            runLaunchctl(["setenv", "MTL_HUD_ELEMENTS", selectedElements.joined(separator: ",")])
-            runLaunchctl(["setenv", "MTL_HUD_OPACITY", String(format: "%.3f", opacity)])
-            runLaunchctl(["setenv", "MTL_HUD_SCALE", String(format: "%.3f", scale)])
-            runLaunchctl(["setenv", "MTL_HUD_ALIGNMENT", alignmentValue(for: alignment)])
-            statusMessage = "✅ Applied Metal HUD settings."
+            runLaunchctl(["setenv",
+                          "MTL_HUD_ENABLED", "1",
+                          "MTL_HUD_ELEMENTS", selectedElements.sorted().joined(separator: ","),
+                          "MTL_HUD_OPACITY", String(format: "%.3f", opacity),
+                          "MTL_HUD_SCALE", String(format: "%.3f", scale),
+                          "MTL_HUD_ALIGNMENT", alignmentValue(for: alignment)])
         } else {
             disableHUD()
         }
@@ -130,7 +111,6 @@ class HUDSettingsManager: ObservableObject {
 
     func disableHUD() {
         runLaunchctl(["unsetenv", "MTL_HUD_ENABLED"])
-        statusMessage = "🚫 Disabled Metal HUD."
     }
 
     func applyOnBootIfNeeded() {
@@ -142,7 +122,7 @@ class HUDSettingsManager: ObservableObject {
     // MARK: - Helpers
 
     func alignmentValue(for key: String) -> String {
-        alignmentMap[key] ?? "4"
+        Self.alignments.first { $0.key == key }?.value ?? "4"
     }
 
     private func runLaunchctl(_ args: [String]) {

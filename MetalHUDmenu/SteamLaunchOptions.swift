@@ -2,8 +2,8 @@
 //  SteamLaunchOptions.swift
 //  MetalHUDMenu
 //
-//  Adds MetalHUDmenu's launch wrapper to Steam's per-game launch options
-//  (the same idea as `mangohud %command%` on Linux).
+//  Older versions put MetalHUDmenu's launch wrapper in every installed Steam game's launch options.
+//  Now people paste the launch option themselves; this only removes what those versions added.
 //
 
 import Foundation
@@ -11,31 +11,18 @@ import Foundation
 enum SteamLaunchOptions {
     static let command = "%command%"
 
-    /// Puts the quoted wrapper right before %command%, keeping whatever the user or another tool already set.
-    static func adding(wrapper: String, to options: String) -> String {
-        let token = "\"\(wrapper)\""
-        if options.contains(token) { return options }
-        let trimmed = options.trimmingCharacters(in: .whitespaces)
-        if trimmed.isEmpty { return "\(token) \(command)" }
-        if let range = trimmed.range(of: command) {
-            return trimmed.replacingCharacters(in: range, with: "\(token) \(command)")
-        }
-        return "\(token) \(command) \(trimmed)" // options without %command% are extra game arguments
-    }
-
     static func removing(wrapper: String, from options: String) -> String {
         let result = options.replacingOccurrences(of: "\"\(wrapper)\" ", with: "")
         return result.trimmingCharacters(in: .whitespaces) == command ? "" : result
     }
 
     /// Rewrites LaunchOptions in localconfig.vdf text. Only touched values change; the rest stays byte-for-byte.
-    /// `appIDs` nil means only apps already listed. Returns nil when the text isn't the layout Steam writes.
-    static func edit(localConfig text: String, appIDs: Set<String>?, _ transform: (String) -> String) -> String? {
+    /// Returns nil when the text isn't the layout Steam writes.
+    static func edit(localConfig text: String, _ transform: (String) -> String) -> String? {
         let bytes = Array(text.utf8)
         let appsPath = ["userlocalconfigstore", "software", "valve", "steam", "apps"]
-        struct App { var close = 0; var value: Range<Int>?; var keyQuote = 0 }
-        var apps: [String: App] = [:]
-        var appsClose: Int?
+        struct Option { var value: Range<Int>; var keyQuote: Int }
+        var options: [Option] = []
         var path: [String] = []
         var pendingKey: String?
         var pendingKeyQuote = 0
@@ -61,63 +48,37 @@ enum SteamLaunchOptions {
                     pendingKeyQuote = start - 1
                     continue
                 }
-                if inApp() && key.lowercased() == "launchoptions" {
-                    apps[path.last!]?.value = range
-                    apps[path.last!]?.keyQuote = pendingKeyQuote
-                }
+                if inApp() && key.lowercased() == "launchoptions" { options.append(Option(value: range, keyQuote: pendingKeyQuote)) }
                 pendingKey = nil
             case UInt8(ascii: "{"):
                 guard let key = pendingKey else { return nil }
                 path.append(key.lowercased())
-                if inApp() { apps[path.last!] = App() }
                 pendingKey = nil
                 i += 1
             case UInt8(ascii: "}"):
                 guard !path.isEmpty, pendingKey == nil else { return nil }
-                if path == appsPath { appsClose = i }
-                if inApp() { apps[path.last!]?.close = i }
                 path.removeLast()
                 i += 1
             default:
                 return nil // unquoted tokens or conditionals: not a file layout we should touch
             }
         }
-        guard let appsClose, path.isEmpty else { return nil }
-
-        let indent = { (depth: Int) in String(repeating: "\t", count: depth) }
-        func optionLine(_ value: String) -> String {
-            "\(indent(appsPath.count + 1))\"LaunchOptions\"\t\t\"\(escape(value))\"\n"
-        }
-        var edits: [(at: Int, remove: Int, insert: String)] = []
-        for (id, app) in apps {
-            if let range = app.value {
-                let old = unescape(String(decoding: bytes[range], as: UTF8.self))
-                let new = transform(old)
-                if new == old { continue }
-                if new.isEmpty {
-                    // Drop the whole line instead of leaving an empty LaunchOptions behind.
-                    let start = lineStart(bytes, app.keyQuote)
-                    var end = range.upperBound + 1
-                    while end < bytes.count && bytes[end] != UInt8(ascii: "\n") { end += 1 }
-                    edits.append((start, min(end + 1, bytes.count) - start, ""))
-                } else {
-                    edits.append((range.lowerBound, range.count, escape(new)))
-                }
-            } else if appIDs?.contains(id) == true {
-                let new = transform("")
-                if !new.isEmpty { edits.append((lineStart(bytes, app.close), 0, optionLine(new))) }
-            }
-        }
-        for id in (appIDs ?? []).subtracting(apps.keys).sorted() {
-            let new = transform("")
-            guard !new.isEmpty else { continue }
-            let block = "\(indent(appsPath.count))\"\(id)\"\n\(indent(appsPath.count)){\n\(optionLine(new))\(indent(appsPath.count))}\n"
-            edits.append((lineStart(bytes, appsClose), 0, block))
-        }
+        guard path.isEmpty else { return nil }
 
         var result = bytes
-        for edit in edits.sorted(by: { $0.at > $1.at }) {
-            result.replaceSubrange(edit.at..<(edit.at + edit.remove), with: Array(edit.insert.utf8))
+        for option in options.reversed() {
+            let old = unescape(String(decoding: bytes[option.value], as: UTF8.self))
+            let new = transform(old)
+            if new == old { continue }
+            if new.isEmpty {
+                // Drop the whole line instead of leaving an empty LaunchOptions behind.
+                let start = lineStart(bytes, option.keyQuote)
+                var end = option.value.upperBound + 1
+                while end < bytes.count && bytes[end] != UInt8(ascii: "\n") { end += 1 }
+                result.replaceSubrange(start..<min(end + 1, bytes.count), with: [])
+            } else {
+                result.replaceSubrange(option.value, with: Array(escape(new).utf8))
+            }
         }
         return String(decoding: result, as: UTF8.self)
     }
@@ -156,36 +117,13 @@ enum SteamFiles {
             .filter { FileManager.default.fileExists(atPath: $0.path) }
     }
 
-    /// App IDs with an appmanifest in any Steam library folder.
-    static func installedAppIDs() -> Set<String> {
-        var libraries = [root.path]
-        if let text = try? String(contentsOf: root.appendingPathComponent("steamapps/libraryfolders.vdf"), encoding: .utf8),
-           let regex = try? NSRegularExpression(pattern: #""path"\s+"((?:[^"\\]|\\.)*)""#) {
-            for match in regex.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
-                if let r = Range(match.range(at: 1), in: text) { libraries.append(SteamLaunchOptions.unescape(String(text[r]))) }
-            }
-        }
-        var ids = Set<String>()
-        for library in Set(libraries) {
-            let files = (try? FileManager.default.contentsOfDirectory(atPath: library + "/steamapps")) ?? []
-            for file in files where file.hasPrefix("appmanifest_") && file.hasSuffix(".acf") {
-                ids.insert(String(file.dropFirst("appmanifest_".count).dropLast(".acf".count)))
-            }
-        }
-        return ids
-    }
-
-    /// Adds (or removes) the wrapper for installed games in every account. Only call while Steam is closed,
+    /// Removes the wrapper from every game in every account. Only call while Steam is closed,
     /// because Steam rewrites localconfig.vdf when it quits. Keeps a one-time backup next to each file.
-    static func sync(wrapper: String, connected: Bool) throws {
-        let ids = connected ? installedAppIDs() : nil
+    static func removeWrapper(_ wrapper: String) throws {
         for url in localConfigs() {
             let text = try String(contentsOf: url, encoding: .utf8)
-            let edited = SteamLaunchOptions.edit(localConfig: text, appIDs: ids) {
-                connected ? SteamLaunchOptions.adding(wrapper: wrapper, to: $0)
-                          : SteamLaunchOptions.removing(wrapper: wrapper, from: $0)
-            }
-            guard let edited, edited != text else { continue }
+            guard let edited = SteamLaunchOptions.edit(localConfig: text, { SteamLaunchOptions.removing(wrapper: wrapper, from: $0) }),
+                  edited != text else { continue }
             let backup = url.appendingPathExtension("metalhudmenu-backup")
             if !FileManager.default.fileExists(atPath: backup.path) {
                 try FileManager.default.copyItem(at: url, to: backup)
