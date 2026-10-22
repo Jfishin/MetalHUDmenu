@@ -34,8 +34,9 @@ inline bool weightedWatts(const std::vector<Bucket> &buckets,double &watts) {
     weighted+=(long double)label*bucket.residency;
     total+=bucket.residency;
   }
-  if(total<=0) return false;
-  watts=(double)(weighted/total);
+  // No residency at all: the cluster was power-gated for the whole interval (common for a second
+  // P-cluster at light load), which is 0 W, not a failed reading.
+  watts=total>0?(double)(weighted/total):0;
   return std::isfinite(watts)&&watts>=0;
 }
 

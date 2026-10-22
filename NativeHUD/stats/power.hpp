@@ -16,8 +16,6 @@
 #include "telemetry.hpp"
 
 namespace hudstats::power {
-enum class Status { Unavailable, Sampling, Ready };
-struct Reading { Status status=Status::Unavailable; double watts=0; };
 struct Values { Reading cpu,gpu,system; };
 
 namespace detail {
@@ -188,12 +186,8 @@ public:
 };
 
 inline Reading systemPower() {
-  io_service_t service=IOServiceGetMatchingService(kIOMainPortDefault,IOServiceMatching("AppleSMC"));
-  if(!service) return {};
-  io_connect_t connection=0;
-  kern_return_t kr=IOServiceOpen(service,mach_task_self(),0,&connection);
-  IOObjectRelease(service);
-  if(kr!=KERN_SUCCESS) return {};
+  const io_connect_t connection=hudstats::detail::smc();
+  if(!connection) return {};
   constexpr uint32_t key=('P'<<24)|('S'<<16)|('T'<<8)|'R';
   static bool known=false;
   if(!known) {
@@ -202,9 +196,7 @@ inline Reading systemPower() {
       &&info.info.type==hudstats::detail::fourcc("flt ");
   }
   uint8_t bytes[32]{};
-  bool ok=known&&hudstats::detail::readKey(connection,key,4,bytes);
-  IOServiceClose(connection);
-  if(!ok) return {};
+  if(!known||!hudstats::detail::readKey(connection,key,4,bytes)) return {};
   float watts=0; memcpy(&watts,bytes,4);
   if(!std::isfinite(watts)||watts<=0||watts>=1000) return {};
   return {Status::Ready,watts};
@@ -225,9 +217,7 @@ public:
     Values result;
     if(system) result.system=detail::systemPower();
     if(!(cpu||gpu)||!ensureAPI()) return result;
-    if(cpu) {
-      result.cpu=cpuGroup.read(api);
-    }
+    if(cpu) result.cpu=cpuGroup.read(api);
     if(gpu) result.gpu=gpuGroup.read(api);
     return result;
   }

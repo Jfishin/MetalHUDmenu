@@ -1,96 +1,260 @@
 // MetalHUDmenu Mac stats: live system readings inside Apple's Metal HUD.
 // macOS 27+: public StateReporting API. macOS 26: the private QuartzCore label API DXMT uses.
-// The stat selection is read live from MetalHUDmenu's preferences (key "systemStats").
+// MetalHUDmenu also loads this library and calls mhud_publisher_start(): it samples for games and
+// publishes the readings as notify states. Sandboxed games (App Store emulators, for example) can read
+// neither its preferences nor the sensors, but can read those. Without a fresh publisher, a game
+// samples by itself using the selection in MetalHUDmenu's preferences (key "systemStats").
 #import <Foundation/Foundation.h>
 #import <StateReporting/StateReporting.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <mach-o/dyld.h>
+#include <array>
+#include <initializer_list>
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <string>
+#include <fcntl.h>
+#include <notify.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include "stats/telemetry.hpp"
 #include "stats/power.hpp"
 #include "stats/usage.hpp"
 
 namespace {
+using hudstats::Reading;
+using hudstats::Status;
 constexpr const char *kDomain="Mac Stats";
 const CFStringRef kPrefsApp=CFSTR("com.Jfishin.MetalHUDmenu");
+const std::string kNotify="com.Jfishin.MetalHUDmenu.stats.";
 
-// Keep in sync with HUDSettingsManager.systemStatCatalog.
-enum Metric { CPUUsage, GPUUsage, CPUTemp, GPUTemp, Fans, SystemPower, CPUPower, GPUPower, Swap, Free, Inactive, Thermal, MetricCount };
-constexpr const char *names[]={"cpuusage","gpuusage","cputemp","gputemp","fans","systempower","cpupower","gpupower","swap","free","inactive","thermal"};
-constexpr const char *labels[]={"CPU usage","GPU usage","CPU temperature","GPU temperature","Fans","System power","CPU power est.","GPU power","Swap used","Free RAM","Free + inactive RAM","Thermal pressure"};
+// The one stat list. MetalHUDmenu shows it through mhud_catalog(), in this order.
+// Tokens are stored in preferences and published names: never rename them. Apple's HUD sorts rows
+// by label, so labels share a prefix ("CPU ", "GPU ", "Memory ") to keep each group together.
+enum Metric { CPUUsage, CPUClock, CPUTemp, CPUPower, GPUUsage, GPUClock, GPUTemp, GPUPower, ANEUsage,
+              MemPressure, Swap, Free, Inactive, SystemPower, Thermal, Fans, MetricCount };
+struct Info { const char *token, *label, *group; };
+constexpr Info catalog[MetricCount]={
+  {"cpuusage","CPU usage","CPU"}, {"cpuclock","CPU clock","CPU"},
+  {"cputemp","CPU temperature","CPU"}, {"cpupower","CPU power est.","CPU"},
+  {"gpuusage","GPU usage","GPU & Neural Engine"}, {"gpuclock","GPU clock","GPU & Neural Engine"},
+  {"gputemp","GPU temperature","GPU & Neural Engine"}, {"gpupower","GPU power","GPU & Neural Engine"},
+  {"aneusage","ANE usage","GPU & Neural Engine"},
+  {"mempressure","Memory pressure","Memory"}, {"swap","Memory swap used","Memory"},
+  {"free","Memory free","Memory"}, {"inactive","Memory free+inactive","Memory"},
+  {"systempower","System power","System"}, {"thermal","Thermal pressure","System"}, {"fans","Fans","System"},
+};
+// Rows per metric; empty means not selected. Fans and CPU clock have several.
+using Rows=std::array<std::vector<Reading>,MetricCount>;
+
 std::atomic_flag started=ATOMIC_FLAG_INIT;
-dispatch_source_t timer;
+dispatch_source_t timer; // a game's HUD sampler, or MetalHUDmenu's publisher (main thread starts it once)
+time_t lastPing=0;       // publisher queue only
 bool debug=false;
+
+// Three bounded milestones per Wine process. NotProton does not forward MHUD_*
+// diagnostics through LaunchServices, so these cannot depend on an env toggle.
+// No arguments, full environment, or game data are recorded. Stop at 1 MiB.
+void wineMilestone(const char *event, NSUInteger rows=0) { @autoreleasepool {
+  if(!getenv("WINEPREFIX")) return;
+  NSString *directory=[NSHomeDirectory() stringByAppendingPathComponent:@"Library/Logs/MetalHUDmenu"];
+  [NSFileManager.defaultManager createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:nil];
+  NSString *path=[directory stringByAppendingPathComponent:@"wine.log"];
+  int fd=open(path.fileSystemRepresentation,O_WRONLY|O_APPEND|O_CREAT|O_NOFOLLOW,0600);
+  if(fd<0) return;
+  struct stat st{};
+  if(!fstat(fd,&st) && S_ISREG(st.st_mode) && st.st_uid==getuid() && st.st_size<1024*1024) {
+#if defined(__arm64__)
+    const char *arch="arm64";
+#else
+    const char *arch="x86_64";
+#endif
+    char line[256];
+    int n=snprintf(line,sizeof(line),"time=%lld pid=%d arch=%s event=%s rows=%lu build=wine-foundation-1\n",
+      (long long)time(nullptr),getpid(),arch,event,(unsigned long)rows);
+    if(n>0 && n<(int)sizeof(line)) (void)write(fd,line,(size_t)n);
+  }
+  close(fd);
+} }
+
+bool statsEnabled() {
+  CFPreferencesAppSynchronize(kPrefsApp);
+  id value=CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("systemStatsEnabled"),kPrefsApp));
+  return ![value isKindOfClass:NSNumber.class] || [value boolValue];
+}
 
 // MetalHUDmenu prefs, or MHUD_SYSTEM_ELEMENTS as a test override.
 void readSelection(bool enabled[MetricCount]) {
   for(int i=0;i<MetricCount;i++) enabled[i]=false;
+  if(!statsEnabled()) return;
   NSArray *list=nil;
   if(const char *env=getenv("MHUD_SYSTEM_ELEMENTS")) list=[@(env) componentsSeparatedByString:@","];
   else {
-    CFPreferencesAppSynchronize(kPrefsApp);
     id value=CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("systemStats"),kPrefsApp));
     if([value isKindOfClass:NSArray.class]) list=value;
   }
   for(id item in list) {
     if(![item isKindOfClass:NSString.class]) continue;
     NSString *word=[item stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
-    for(int i=0;i<MetricCount;i++) if([word isEqualToString:@(names[i])]) enabled[i]=true;
+    for(int i=0;i<MetricCount;i++) if([word isEqualToString:@(catalog[i].token)]) enabled[i]=true;
   }
+}
+
+// One sample of the selected readings. Samplers keep interval state, so they live for the process.
+Rows measure(const bool on[MetricCount]) {
+  using namespace hudstats;
+  Rows rows;
+  auto one=[&](Metric m,Reading r) { rows[m]={r}; };
+  auto ready=[](bool ok,double value) { return ok?Reading{Status::Ready,value}:Reading{}; };
+  if(on[CPUUsage]) { static usage::CPUSampler s; one(CPUUsage,s.read()); }
+  if(on[CPUClock]) { static usage::CPUClockSampler s; auto c=s.read(); rows[CPUClock]={c.efficiency,c.performance}; }
+  if(on[GPUUsage]||on[GPUClock]) {
+    static usage::GPUSampler s;
+    auto g=s.read();
+    if(on[GPUUsage]) one(GPUUsage,g.usage);
+    if(on[GPUClock]) one(GPUClock,g.clock);
+  }
+  if(on[ANEUsage]) { static usage::ANESampler s; one(ANEUsage,s.read()); }
+  if(on[CPUTemp]||on[GPUTemp]) {
+    auto t=readTemperatures();
+    if(on[CPUTemp]) one(CPUTemp,ready(t.cpuOK,t.cpuC));
+    if(on[GPUTemp]) one(GPUTemp,ready(t.gpuOK,t.gpuC));
+  }
+  if(on[Fans]) {
+    auto f=readFans();
+    if(!f.countOK) one(Fans,{});
+    else if(f.fans.empty()) one(Fans,{Status::Ready,NAN}); // fanless Mac
+    for(const auto &fan:f.fans) rows[Fans].push_back(ready(fan.actual,fan.rpm));
+  }
+  if(on[CPUPower]||on[GPUPower]||on[SystemPower]) {
+    static power::Sampler s;
+    auto v=s.read(on[CPUPower],on[GPUPower],on[SystemPower]);
+    if(on[CPUPower]) one(CPUPower,v.cpu);
+    if(on[GPUPower]) one(GPUPower,v.gpu);
+    if(on[SystemPower]) one(SystemPower,v.system);
+  }
+  if(on[MemPressure]) {
+    // Activity Monitor's numbers: the kernel's free percentage and its pressure level (1, 2 or 4).
+    int freePercent=-1, level=0; size_t size=sizeof(int);
+    const bool ok=sysctlbyname("kern.memorystatus_level",&freePercent,&size,nullptr,0)==0&&freePercent>=0&&freePercent<=100
+      &&sysctlbyname("kern.memorystatus_vm_pressure_level",&level,&size,nullptr,0)==0;
+    one(MemPressure,ready(ok,level*1000+(100-freePercent))); // one value: level in thousands, percent below
+  }
+  if(on[Swap]||on[Free]||on[Inactive]) {
+    constexpr double GiB=1073741824.0;
+    auto m=readMemory();
+    if(on[Swap]) one(Swap,ready(m.swapOK,m.swapUsedBytes/GiB));
+    if(on[Free]) one(Free,ready(m.vmOK,m.freeBytes/GiB));
+    if(on[Inactive]) one(Inactive,ready(m.vmOK,(m.freeBytes+m.inactiveBytes)/GiB));
+  }
+  if(on[Thermal]) {
+    NSInteger s=NSProcessInfo.processInfo.thermalState;
+    one(Thermal,ready(s>=0&&s<=3,(double)s));
+  }
+  return rows;
 }
 
 NSString *fmt(const char *f,double v) { return [NSString stringWithFormat:@(f),v]; }
 
-// One sample of the selected readings, as row label -> text.
-NSDictionary<NSString*,NSString*> *sample(const bool on[MetricCount]) {
+NSString *label(Metric m,size_t row,const Reading &r) {
+  if(m==CPUClock) return row==0?@"CPU E-core clock":@"CPU P-core clock";
+  if(m==Fans&&r.status==Status::Ready&&!std::isnan(r.value)) return [NSString stringWithFormat:@"Fan %zu",row+1];
+  return @(catalog[m].label);
+}
+
+NSString *text(Metric m,const Reading &r) {
+  if(r.status==Status::Sampling) return @"Sampling...";
+  if(r.status!=Status::Ready) return @"Unavailable";
+  switch(m) {
+    case CPUUsage: case GPUUsage: case ANEUsage: return fmt("%.1f%%",r.value);
+    case CPUClock: case GPUClock: return r.value>0?fmt("%.0f MHz",r.value):@"Idle";
+    case CPUTemp: case GPUTemp: return fmt("%.1f C",r.value);
+    case CPUPower: return fmt("~%.1f W",r.value);
+    case GPUPower: case SystemPower: return fmt("%.1f W",r.value);
+    case MemPressure: {
+      const int level=int(r.value)/1000;
+      NSString *name=level==1?@"Normal":level==2?@"Warning":level==4?@"Critical":@"Unknown";
+      return [NSString stringWithFormat:@"%d%% %@",int(r.value)%1000,name];
+    }
+    case Swap: case Free: case Inactive: return fmt("%.2f GiB",r.value);
+    case Thermal: return r.value>=0&&r.value<=3?@[@"Nominal",@"Fair",@"Serious",@"Critical"][(NSUInteger)r.value]:@"Unavailable";
+    case Fans: return std::isnan(r.value)?@"None":fmt("%.0f RPM",r.value);
+    case MetricCount: break;
+  }
+  return @"Unavailable";
+}
+
+// Row label -> text.
+NSDictionary<NSString*,NSString*> *format(const Rows &rows) {
   NSMutableDictionary *out=[NSMutableDictionary dictionary];
-  auto usage=[&](Metric m,hudstats::usage::Reading r) {
-    out[@(labels[m])]=r.status==hudstats::usage::Status::Ready?fmt("%.1f%%",r.percent):r.status==hudstats::usage::Status::Sampling?@"Sampling...":@"Unavailable";
-  };
-  if(on[CPUUsage]) { static hudstats::usage::CPUSampler s; usage(CPUUsage,s.read()); }
-  if(on[GPUUsage]) { static hudstats::usage::GPUSampler s; usage(GPUUsage,s.read()); }
-  if(on[CPUTemp]||on[GPUTemp]) {
-    auto t=hudstats::readTemperatures();
-    if(on[CPUTemp]) out[@(labels[CPUTemp])]=t.cpuOK?fmt("%.1f C",t.cpuMaxC):@"Unavailable";
-    if(on[GPUTemp]) out[@(labels[GPUTemp])]=t.gpuOK?fmt("%.1f C",t.gpuMaxC):@"Unavailable";
-  }
-  if(on[Fans]) {
-    auto f=hudstats::readFans();
-    if(!f.countOK) out[@"Fans"]=@"Unavailable";
-    else if(f.fans.empty()) out[@"Fans"]=@"None";
-    for(size_t i=0;i<f.fans.size();i++)
-      out[[NSString stringWithFormat:@"Fan %zu",i+1]]=f.fans[i].actual?fmt("%.0f RPM",f.fans[i].rpm):@"Unavailable";
-  }
-  if(on[CPUPower]||on[GPUPower]||on[SystemPower]) {
-    static hudstats::power::Sampler s;
-    auto v=s.read(on[CPUPower],on[GPUPower],on[SystemPower]);
-    auto watts=[&](Metric m,hudstats::power::Reading r,const char *f) {
-      out[@(labels[m])]=r.status==hudstats::power::Status::Ready?fmt(f,r.watts):r.status==hudstats::power::Status::Sampling?@"Sampling...":@"Unavailable";
-    };
-    if(on[SystemPower]) watts(SystemPower,v.system,"%.1f W");
-    if(on[CPUPower]) watts(CPUPower,v.cpu,"~%.1f W");
-    if(on[GPUPower]) watts(GPUPower,v.gpu,"%.1f W");
-  }
-  if(on[Swap]||on[Free]||on[Inactive]) {
-    auto m=hudstats::readMemory();
-    if(on[Swap]) out[@(labels[Swap])]=m.swapOK?fmt("%.2f GiB",m.swapUsedBytes/1073741824.0):@"Unavailable";
-    if(on[Free]) out[@(labels[Free])]=m.vmOK?fmt("%.2f GiB",m.freeBytes/1073741824.0):@"Unavailable";
-    if(on[Inactive]) out[@(labels[Inactive])]=m.vmOK?fmt("%.2f GiB",(m.freeBytes+m.inactiveBytes)/1073741824.0):@"Unavailable";
-  }
-  if(on[Thermal]) {
-    NSInteger s=NSProcessInfo.processInfo.thermalState;
-    out[@(labels[Thermal])]=s>=0&&s<=3?@[@"Nominal",@"Fair",@"Serious",@"Critical"][s]:@"Unavailable";
-  }
+  for(int m=0;m<MetricCount;m++)
+    for(size_t i=0;i<rows[m].size();i++) out[label(Metric(m),i,rows[m][i])]=text(Metric(m),rows[m][i]);
   return out;
+}
+
+// Cross-process channel: one 64-bit notify state per value; the App Sandbox allows reading them.
+// "<token>" holds the row count (0 = not selected), "<token>.<row>" the status (high 32 bits)
+// and float value (low 32 bits), "stamp" the publish time. Each process uses one serial queue.
+int notifyToken(const std::string &suffix) {
+  static std::map<std::string,int> tokens;
+  auto found=tokens.find(suffix);
+  if(found!=tokens.end()) return found->second;
+  int token=-1;
+  if(notify_register_check((kNotify+suffix).c_str(),&token)!=NOTIFY_STATUS_OK) token=-1;
+  return tokens[suffix]=token;
+}
+uint64_t getState(const std::string &suffix) {
+  uint64_t value=0;
+  const int token=notifyToken(suffix);
+  if(token>=0) notify_get_state(token,&value);
+  return value;
+}
+void setState(const std::string &suffix,uint64_t value) {
+  const int token=notifyToken(suffix);
+  if(token>=0) notify_set_state(token,value);
+}
+uint64_t pack(const Reading &r) {
+  const float value=(float)r.value;
+  uint32_t bits; std::memcpy(&bits,&value,4);
+  return (uint64_t(r.status)<<32)|bits;
+}
+Reading unpack(uint64_t state) {
+  const uint32_t bits=(uint32_t)state, status=(uint32_t)(state>>32);
+  float value; std::memcpy(&value,&bits,4);
+  return status<=uint32_t(Status::Ready)?Reading{Status(status),value}:Reading{};
+}
+
+void publish(const Rows &rows) {
+  for(int m=0;m<MetricCount;m++) {
+    const std::string token=catalog[m].token;
+    for(size_t i=0;i<rows[m].size();i++) setState(token+"."+std::to_string(i),pack(rows[m][i]));
+    setState(token,rows[m].size());
+  }
+  setState("stamp",(uint64_t)time(nullptr));
+}
+
+// Rows MetalHUDmenu published within the last few seconds.
+bool fetch(Rows &rows) {
+  const uint64_t stamp=getState("stamp"), now=(uint64_t)time(nullptr);
+  if(!stamp||now<stamp||now-stamp>3) return false;
+  for(int m=0;m<MetricCount;m++) {
+    const std::string token=catalog[m].token;
+    const uint64_t count=std::min<uint64_t>(getState(token),16);
+    rows[m].clear();
+    for(uint64_t i=0;i<count;i++) rows[m].push_back(unpack(getState(token+"."+std::to_string(i))));
+  }
+  return true;
 }
 
 // macOS 27+: Apple's HUD shows these under State Reporters, sorted by label.
 API_AVAILABLE(macos(27.0)) void reportModern(NSDictionary *values) {
   static bool live=false;
+  // Do not even register a reporter when disabled from process startup.
+  if(!values.count && !live) return;
   SRStateReporter *reporter=[SRStateReporter reporterForDomain:@(kDomain)];
   if(!values.count) { if(live) [reporter reportTransitionToStateLabel:nil stableMetadata:nil volatileMetadata:nil]; live=false; return; }
   if(!live) [reporter reportTransitionToStateLabel:@"Live" stableMetadata:nil volatileMetadata:values];
@@ -98,8 +262,74 @@ API_AVAILABLE(macos(27.0)) void reportModern(NSDictionary *values) {
   live=true;
 }
 
+// Only values with a clear good/bad range get a color; the rest stay white. Format 0xAABBGGRR.
+uint32_t valueColor(Metric m,const Reading &r) {
+  constexpr uint32_t White=0xFFFFFFFF, Green=0xFF58D130, Yellow=0xFF0AD6FF, Orange=0xFF0A9FFF, Red=0xFF3A45FF;
+  if(r.status!=Status::Ready) return White;
+  switch(m) {
+    case CPUTemp: case GPUTemp: return r.value>=85?Red:r.value>=65?Yellow:Green;
+    case Thermal: { constexpr uint32_t states[4]={Green,Yellow,Orange,Red}; return r.value>=0&&r.value<=3?states[int(r.value)]:White; }
+    case MemPressure: { const int level=int(r.value)/1000; return level==1?Green:level==2?Yellow:level==4?Red:White; }
+    default: return White;
+  }
+}
+
+// macOS 27: Apple's private custom-metric API (MTLHUDService, the one D3DMetal and DXMT call). It draws
+// flush, colored rows in our order under "Custom Metrics". Every hop is checked once; when anything is
+// missing or changed, this returns nil and the rows fall back to State Reporters (white, indented).
+API_AVAILABLE(macos(27.0)) id metricService() {
+  static id service=[]() -> id {
+    if(getenv("MHUD_STATE_REPORTER")) return nil; // force the fallback, to check it after an OS update
+    Class cls=objc_lookUpClass("MTLHUDService");
+    Method insert=cls?class_getInstanceMethod(cls,@selector(insertMetric:after:name:unit:nameColor:valueColor:visualType:options:)):nullptr;
+    // BOOL is "B" on arm64 and "c" on x86_64; the arguments must match exactly.
+    if(!insert||strcmp(method_getTypeEncoding(insert)+1,"68@0:8@16@24@32@40I48I52I56Q60")) return nil;
+    for(SEL selector:{@selector(updateLabelMetric:label:),@selector(updateMetricColor:nameColor:valueColor:),
+                      @selector(removeMetric:),@selector(isHUDElementEnabled:)})
+      if(![cls instancesRespondToSelector:selector]) return nil;
+    if(![cls respondsToSelector:@selector(instance)]) return nil;
+    id instance=((id(*)(id,SEL))objc_msgSend)(cls,@selector(instance));
+    // The section only draws with the "client" element (bit 31), which start() adds.
+    return instance&&((BOOL(*)(id,SEL,uint64_t))objc_msgSend)(instance,@selector(isHUDElementEnabled:),1ull<<31)?instance:nil;
+  }();
+  return service;
+}
+
+// False when the custom-metric API isn't usable, so the caller reports through State Reporters instead.
+API_AVAILABLE(macos(27.0)) bool reportColored(const Rows &rows) {
+  static int warmup=2; // let Apple's HUD finish loading before asking for its service
+  if(warmup>0) { warmup--; return true; }
+  id service=metricService();
+  if(!service) return false;
+  static NSArray<NSString*> *shown=@[]; // "identifier\tname" per row, in order
+  NSMutableArray<NSString*> *rowsNow=[NSMutableArray array];
+  for(int m=0;m<MetricCount;m++)
+    for(size_t i=0;i<rows[m].size();i++)
+      [rowsNow addObject:[NSString stringWithFormat:@"MetalHUDmenu.%s.%zu\t%@",catalog[m].token,i,label(Metric(m),i,rows[m][i])]];
+  if(![rowsNow isEqualToArray:shown]) {
+    for(NSString *row in shown)
+      ((void(*)(id,SEL,id))objc_msgSend)(service,@selector(removeMetric:),[row componentsSeparatedByString:@"\t"][0]);
+    for(NSString *row in rowsNow) {
+      NSArray *parts=[row componentsSeparatedByString:@"\t"]; // nil "after" appends
+      ((BOOL(*)(id,SEL,id,id,id,id,uint32_t,uint32_t,uint32_t,uint64_t))objc_msgSend)(service,
+        @selector(insertMetric:after:name:unit:nameColor:valueColor:visualType:options:),
+        parts[0],nil,parts[1],@"",0xFFFFFFFFu,0xFFFFFFFFu,1u,0ull);
+    }
+    shown=rowsNow;
+  }
+  NSUInteger k=0;
+  for(int m=0;m<MetricCount;m++)
+    for(size_t i=0;i<rows[m].size();i++,k++) {
+      NSString *identifier=[rowsNow[k] componentsSeparatedByString:@"\t"][0];
+      ((void(*)(id,SEL,id,uint32_t,uint32_t))objc_msgSend)(service,@selector(updateMetricColor:nameColor:valueColor:),
+        identifier,0xFFFFFFFFu,valueColor(Metric(m),rows[m][i]));
+      ((void(*)(id,SEL,id,id))objc_msgSend)(service,@selector(updateLabelMetric:label:),identifier,text(Metric(m),rows[m][i]));
+    }
+  return true;
+}
+
 // macOS 26: one HUD line per stat via _CADeveloperHUDProperties (addLabel:after:, updateLabel:value:, remove:),
-// the same calls DXMT makes. These methods are gone on 27, so every call is guarded.
+// the same calls DXMT makes there. Every call is guarded; macOS 27 uses StateReporting instead.
 // ponytail: untested on a macOS 26 machine; verify layout and threading there.
 void reportLegacy(NSDictionary<NSString*,NSString*> *values) {
   static NSArray<NSString*> *shown=@[];
@@ -121,10 +351,19 @@ void reportLegacy(NSDictionary<NSString*,NSString*> *values) {
 }
 
 void tick() { @autoreleasepool {
-  bool on[MetricCount]; readSelection(on);
-  NSDictionary *values=sample(on);
-  if(@available(macOS 27.0,*)) reportModern(values); else reportLegacy(values);
-  if(debug) fprintf(stderr,"MHUD_STATS %s\n",values.description.UTF8String);
+  // Tell MetalHUDmenu a HUD wants readings; it publishes while these keep arriving.
+  notify_post((kNotify+"client").c_str());
+  Rows rows;
+  const bool published=!getenv("MHUD_SYSTEM_ELEMENTS")&&fetch(rows);
+  if(!published) { bool on[MetricCount]; readSelection(on); rows=measure(on); }
+  NSDictionary *values=format(rows);
+  bool colored=false;
+  if(@available(macOS 27.0,*)) { colored=reportColored(rows); if(!colored) reportModern(values); }
+  else reportLegacy(values);
+  static bool reported=false;
+  if(values.count && !reported) { wineMilestone("stats-reported",values.count); reported=true; }
+  if(debug) fprintf(stderr,"MHUD_STATS %s %s %s\n",published?"published":"local",colored?"custom-metrics":"state-reporter",
+                    values.description.UTF8String);
 } }
 
 // Runs under dyld's loader lock: only look up the image name, then start the timer.
@@ -136,7 +375,11 @@ void imageAdded(const mach_header *header,intptr_t) {
   if(strcmp(base,"libMTLHud.dylib")!=0||started.test_and_set()) return;
   timer=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,dispatch_queue_create("MetalHUDmenu.stats",DISPATCH_QUEUE_SERIAL));
   dispatch_source_set_timer(timer,DISPATCH_TIME_NOW,NSEC_PER_SEC,NSEC_PER_SEC/10);
-  dispatch_source_set_event_handler(timer,^{ tick(); });
+  dispatch_source_set_event_handler(timer,^{
+    static bool logged=false;
+    if(!logged) { wineMilestone("apple-hud-loaded"); logged=true; }
+    tick();
+  });
   dispatch_resume(timer);
   if(debug) fprintf(stderr,"MHUD_STATS_STARTED %s\n",name);
 }
@@ -149,14 +392,54 @@ void appendEnv(const char *key,const char *token) {
   if(list.find(std::string(",")+token+",")!=std::string::npos) return;
   setenv(key,(std::string(cur)+","+token).c_str(),1);
 }
+
+bool insideMetalHUDmenu() {
+  CFBundleRef bundle=CFBundleGetMainBundle();
+  CFStringRef identifier=bundle?CFBundleGetIdentifier(bundle):nullptr;
+  return identifier&&CFEqual(identifier,kPrefsApp);
+}
 } // namespace
 
+// "token\tlabel\tgroup\n" per stat, for MetalHUDmenu's settings.
+extern "C" __attribute__((visibility("default"))) const char *mhud_catalog(void) {
+  static const std::string text=[] {
+    std::string out;
+    for(const auto &item:catalog) out+=std::string(item.token)+"\t"+item.label+"\t"+item.group+"\n";
+    return out;
+  }();
+  return text.c_str();
+}
+
+// Called by MetalHUDmenu: samples once a second while any game's helper has pinged recently.
+extern "C" __attribute__((visibility("default"))) void mhud_publisher_start(void) {
+  if(timer) return;
+  dispatch_queue_t queue=dispatch_queue_create("MetalHUDmenu.publisher",DISPATCH_QUEUE_SERIAL);
+  int token;
+  notify_register_dispatch((kNotify+"client").c_str(),&token,queue,^(int) { lastPing=time(nullptr); });
+  timer=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,queue);
+  dispatch_source_set_timer(timer,DISPATCH_TIME_NOW,NSEC_PER_SEC,NSEC_PER_SEC/10);
+  dispatch_source_set_event_handler(timer,^{ @autoreleasepool {
+    if(time(nullptr)-lastPing>5) return;
+    bool on[MetricCount]; readSelection(on);
+    publish(measure(on));
+  } });
+  dispatch_resume(timer);
+}
+
 __attribute__((constructor)) static void start() {
+  // MetalHUDmenu loads this library only to publish and read the catalog.
+  if(insideMetalHUDmenu()) return;
   debug=getenv("MHUD_DEBUG")&&!strcmp(getenv("MHUD_DEBUG"),"1");
-  // Adds the State Reporters section on top of the user's own HUD rows (read when Apple's HUD loads).
+  if(debug) fprintf(stderr,"MHUD_STATS_LOADED pid=%d\n",getpid());
+  wineMilestone("helper-loaded");
+  // Adds the Custom Metrics ("client") and State Reporters sections on top of the user's own HUD rows
+  // (read when Apple's HUD loads). Rows go to Custom Metrics; State Reporters is the fallback.
   if(@available(macOS 27.0,*)) {
-    appendEnv("MTL_HUD_EXTRA_ELEMENTS","statereporter");
-    appendEnv("MTL_HUD_STATE_REPORTER_DOMAINS",kDomain);
+    if(statsEnabled()) {
+      appendEnv("MTL_HUD_EXTRA_ELEMENTS","client");
+      appendEnv("MTL_HUD_EXTRA_ELEMENTS","statereporter");
+      appendEnv("MTL_HUD_STATE_REPORTER_DOMAINS",kDomain);
+    }
   }
   _dyld_register_func_for_add_image(imageAdded);
 }

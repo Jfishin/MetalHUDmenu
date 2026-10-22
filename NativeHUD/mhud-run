@@ -2,14 +2,30 @@
 # MetalHUDmenu launch wrapper. Steam launch option:  "<path>/mhud-run" %command%
 # Adds the Mac stats library to the game and keeps Steam's own overlay libraries.
 lib="$(cd "$(dirname "$0")" && pwd)/libMHUDStats.dylib"
+[ "$#" -gt 0 ] || { echo 'Usage: mhud-run command [arguments…]' >&2; exit 64; }
+# A missing helper must not stop a game or app bundle from launching.
+if [ ! -r "$lib" ]; then
+  case "$1" in
+    *.app|*.app/) app="$1"; shift; exec /usr/bin/open -W -n "$app" --args "$@" ;;
+    *) exec "$@" ;;
+  esac
+fi
+
+append_library() {
+  case ":$1:" in
+    *":$lib:"*) printf '%s' "$1" ;;
+    *) printf '%s' "${1:+$1:}$lib" ;;
+  esac
+}
 
 # macOS strips DYLD_* before /bin/sh runs, so Steam's overlay list survives only in its STEAM_ copy.
 base="${DYLD_INSERT_LIBRARIES:-$STEAM_DYLD_INSERT_LIBRARIES}"
-export DYLD_INSERT_LIBRARIES="${base:+$base:}$lib"
+export DYLD_INSERT_LIBRARIES="$(append_library "$base")"
 # Compatibility tools (NotProton) rebuild the game's list from the STEAM_ copy, so add it there too.
-[ -n "$STEAM_DYLD_INSERT_LIBRARIES" ] && export STEAM_DYLD_INSERT_LIBRARIES="$STEAM_DYLD_INSERT_LIBRARIES:$lib"
+# Always create that copy: the Steam overlay may be off. Preserve the two lists independently.
+export STEAM_DYLD_INSERT_LIBRARIES="$(append_library "${STEAM_DYLD_INSERT_LIBRARIES:-$base}")"
 
 case "$1" in
-  *.app|*.app/) app="$1"; shift; exec /usr/bin/open -W -n --env DYLD_INSERT_LIBRARIES="$DYLD_INSERT_LIBRARIES" "$app" --args "$@" ;;
+  *.app|*.app/) app="$1"; shift; exec /usr/bin/open -W -n --env DYLD_INSERT_LIBRARIES="$DYLD_INSERT_LIBRARIES" --env STEAM_DYLD_INSERT_LIBRARIES="$STEAM_DYLD_INSERT_LIBRARIES" "$app" --args "$@" ;;
   *) exec "$@" ;;
 esac

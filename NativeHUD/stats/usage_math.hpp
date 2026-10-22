@@ -22,8 +22,10 @@ inline bool totalCPUPercent(const CPUTicks &before,const CPUTicks &after,double 
   return true;
 }
 
-struct GPUState { std::string name; int64_t residency=0; };
-inline bool gpuActivePercent(const std::vector<GPUState> &states,double &percent) {
+// One IOReport state and its residency over a sample interval.
+struct State { std::string name; int64_t residency=0; };
+
+inline bool gpuActivePercent(const std::vector<State> &states,double &percent) {
   long double active=0, total=0;
   std::set<std::string> names;
   bool sawInactive=false, sawActive=false;
@@ -41,6 +43,47 @@ inline bool gpuActivePercent(const std::vector<GPUState> &states,double &percent
   }
   if(!sawInactive||!sawActive||total<=0) return false;
   percent=double(100*active/total);
+  return true;
+}
+
+// pmgr frequency-table index of an active performance state:
+// CPU complexes name them "V<i>P<j>", the GPU "P<i>". Idle states (OFF/IDLE/DOWN) give -1.
+inline int frequencyIndex(const std::string &name) {
+  if(name.size()<2||(name[0]!='V'&&name[0]!='P')) return -1;
+  size_t i=1; int index=0;
+  while(i<name.size()&&name[i]>='0'&&name[i]<='9'&&index<1000) index=index*10+(name[i++]-'0');
+  if(i==1) return -1;
+  if(name[0]=='P') return i==name.size()?index:-1;
+  return i+1<name.size()&&name[i]=='P'?index:-1;
+}
+
+// Residency-weighted clock while active, in the table's unit. 0 means idle the whole interval.
+// False when a state falls outside the table: an unverified chip layout.
+inline bool activeClock(const std::vector<State> &states,const std::vector<double> &table,double &clock) {
+  long double weighted=0, active=0;
+  for(const auto &state:states) {
+    const int index=frequencyIndex(state.name);
+    if(index<0) continue;
+    if(index>=(int)table.size()||state.residency<0) return false;
+    weighted+=(long double)table[(size_t)index]*state.residency;
+    active+=state.residency;
+  }
+  clock=active>0?double(weighted/active):0;
+  return true;
+}
+
+// Share of time a PMP floor channel requests more than its lowest step (VMIN, F1, ...).
+// Used for the ANE, whose energy counters read 0 on macOS 27 (same idea as mactop).
+inline bool raisedFloorPercent(const std::vector<State> &states,double &percent) {
+  if(states.size()<2) return false;
+  long double raised=0, total=0;
+  for(size_t i=0;i<states.size();i++) {
+    if(states[i].residency<0) return false;
+    total+=states[i].residency;
+    if(i>0) raised+=states[i].residency;
+  }
+  if(total<=0) return false;
+  percent=double(100*raised/total);
   return true;
 }
 

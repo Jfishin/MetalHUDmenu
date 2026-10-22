@@ -13,8 +13,13 @@
 #include <vector>
 #include <cerrno>
 #include <cmath>
+#include <algorithm>
 
 namespace hudstats {
+// Interval readings need two samples before they are Ready.
+enum class Status { Unavailable, Sampling, Ready };
+struct Reading { Status status=Status::Unavailable; double value=0; };
+
 struct MemorySample {
   uint64_t physicalBytes=0, freeBytes=0, inactiveBytes=0, purgeableBytes=0;
   uint64_t swapUsedBytes=0, swapTotalBytes=0;
@@ -37,12 +42,33 @@ inline MemorySample readMemory() {
   }
   return s;
 }
-struct TemperatureSensor { std::string key; float celsius; };
-struct TemperatureSample {
-  std::vector<TemperatureSensor> cpu, gpu;
-  float cpuMeanC=0, cpuMaxC=0, gpuMeanC=0, gpuMaxC=0;
-  bool cpuOK=false, gpuOK=false;
-};
+struct TemperatureSample { float cpuC=0, gpuC=0; bool cpuOK=false, gpuOK=false; };
+
+// AppleSMC parks sensors of power-gated clusters at exactly 40.0 and some keys at small constants.
+inline bool plausibleCelsius(float v) { return std::isfinite(v) && v>=25 && v<120 && v!=40.0f; }
+
+// Group headline: the hottest sensor when the keys are known core/cluster sensors (TG Pro's "highest"),
+// otherwise the mean, because unknown chips mix core keys with hotter hotspot keys a max would pick.
+inline bool temperatureHeadline(const std::vector<float> &values,bool knownKeys,float &out) {
+  float sum=0, hottest=0; size_t count=0;
+  for(float v:values) if(plausibleCelsius(v)) { sum+=v; hottest=count?std::max(hottest,v):v; count++; }
+  if(!count) return false;
+  out=knownKeys?hottest:sum/count;
+  return true;
+}
+
+// Per-core SMC keys TG Pro shows on this chip, matched against it on an M4 Max (Mac16,6, macOS 27).
+// ponytail: one verified chip; others average every Tp*/Te* key until checked against TG Pro.
+inline const std::vector<std::string> &coreTemperatureKeys() {
+  static const std::vector<std::string> keys=[] {
+    char brand[128]{}; size_t size=sizeof(brand);
+    sysctlbyname("machdep.cpu.brand_string",brand,&size,nullptr,0);
+    if(!std::strcmp(brand,"Apple M4 Max"))
+      return std::vector<std::string>{"Te05","Te0S","Tp01","Tp09","Tp0H","Tp0P","Tp0X","Tp1j","Tp1t","Tp1z","Tp25","Tp2B"};
+    return std::vector<std::string>{};
+  }();
+  return keys;
+}
 namespace detail {
 struct SMCVersion { uint8_t major,minor,build,reserved; uint16_t release; };
 struct SMCPLimitData { uint16_t version,length; uint32_t cpu,gpu,mem; };
@@ -54,15 +80,25 @@ inline std::string name(uint32_t k) { char b[5]={(char)(k>>24),(char)(k>>16),(ch
 inline bool call(io_connect_t c, SMCParam &in, SMCParam &out) { size_t n=sizeof(out); std::memset(&out,0,sizeof(out)); return IOConnectCallStructMethod(c,2,&in,sizeof(in),&out,&n)==KERN_SUCCESS && out.result==0; }
 inline bool keyInfo(io_connect_t c,uint32_t key,SMCParam &out) { SMCParam in{}; in.key=key; in.cmd=9; return call(c,in,out); }
 inline bool readKey(io_connect_t c,uint32_t key,uint32_t size,uint8_t bytes[32]) { SMCParam in{}; in.key=key; in.info.size=size; in.cmd=5; SMCParam out{}; if(!call(c,in,out)) return false; std::memcpy(bytes,out.bytes,32); return true; }
+// One AppleSMC connection per process, opened on first use and kept. 0 when denied (e.g. App Sandbox).
+// Callers share one serial sampling queue.
+inline io_connect_t smc() {
+  static io_connect_t connection=[]{
+    io_connect_t c=0;
+    io_service_t service=IOServiceGetMatchingService(kIOMainPortDefault,IOServiceMatching("AppleSMC"));
+    if(service && IOServiceOpen(service,mach_task_self(),0,&c)!=KERN_SUCCESS) c=0;
+    if(service) IOObjectRelease(service);
+    return c;
+  }();
+  return connection;
+}
 }
 struct FanReading { std::string key, keyType; double rpm=0; bool actual=false; };
 struct FanSample { std::vector<FanReading> fans; bool countOK=false; };
 inline FanSample readFans() {
   FanSample sample;
-  io_service_t service=IOServiceGetMatchingService(kIOMainPortDefault,IOServiceMatching("AppleSMC"));
-  if(!service) return sample;
-  io_connect_t c=0; kern_return_t kr=IOServiceOpen(service,mach_task_self(),0,&c); IOObjectRelease(service);
-  if(kr!=KERN_SUCCESS) return sample;
+  const io_connect_t c=detail::smc();
+  if(!c) return sample;
   auto readCount=[&](const char *key,uint32_t &value)->bool {
     detail::SMCParam info{}; const uint32_t k=detail::fourcc(key);
     if(!detail::keyInfo(c,k,info) || info.info.size==0 || info.info.size>4) return false;
@@ -96,17 +132,16 @@ inline FanSample readFans() {
       sample.fans.push_back(reading);
     }
   }
-  IOServiceClose(c); return sample;
+  return sample;
 }
 
 inline TemperatureSample readTemperatures() {
   TemperatureSample s;
-  io_service_t service=IOServiceGetMatchingService(kIOMainPortDefault,IOServiceMatching("AppleSMC"));
-  if(!service) return s; io_connect_t c=0; kern_return_t kr=IOServiceOpen(service,mach_task_self(),0,&c); IOObjectRelease(service);
-  if(kr!=KERN_SUCCESS) return s;
+  const io_connect_t c=detail::smc();
+  if(!c) return s;
   // Discover once per process. The caller owns serialization.
   static std::vector<std::pair<uint32_t,bool>> candidates;
-  static bool discovered=false;
+  static bool discovered=false, coreKeys=false;
   if(!discovered) {
   detail::SMCParam inf{}; uint32_t count=0;
   if(detail::keyInfo(c,detail::fourcc("#KEY"),inf) && inf.info.size==4 && detail::readKey(c,detail::fourcc("#KEY"),4,inf.bytes))
@@ -124,15 +159,22 @@ inline TemperatureSample readTemperatures() {
   }
   discovered=true;
   }
+  // Keep only the chip's core keys when it has a verified list and they exist here.
+  const auto &cores=coreTemperatureKeys();
+  auto isCore=[&](uint32_t key) { return std::find(cores.begin(),cores.end(),detail::name(key))!=cores.end(); };
+  coreKeys=std::any_of(candidates.begin(),candidates.end(),[&](const auto &k) { return k.second&&isCore(k.first); });
+  if(coreKeys) candidates.erase(std::remove_if(candidates.begin(),candidates.end(),
+    [&](const auto &k) { return k.second&&!isCore(k.first); }),candidates.end());
   }
+  std::vector<float> cpu, gpu;
   for(const auto& candidate:candidates) {
     uint8_t b[32]{};if(!detail::readKey(c,candidate.first,4,b))continue;
-    float v;std::memcpy(&v,b,4);if(!std::isfinite(v)||v<10||v>120)continue;
-    (candidate.second?s.cpu:s.gpu).push_back({detail::name(candidate.first),v});
+    float v;std::memcpy(&v,b,4);
+    (candidate.second?cpu:gpu).push_back(v);
   }
-  IOServiceClose(c);
-  auto summarize=[](const std::vector<TemperatureSensor>&xs,float&mean,float&max){ if(xs.empty())return; float sum=0;max=xs.front().celsius;for(const auto&x:xs){sum+=x.celsius;if(x.celsius>max)max=x.celsius;}mean=sum/xs.size();};
-  summarize(s.cpu,s.cpuMeanC,s.cpuMaxC); summarize(s.gpu,s.gpuMeanC,s.gpuMaxC);
-  s.cpuOK=!s.cpu.empty(); s.gpuOK=!s.gpu.empty(); return s;
+  // GPU: the hottest Tg* key. On the M4 Max it matches TG Pro's hottest GPU cluster within 0.1 C.
+  s.cpuOK=temperatureHeadline(cpu,coreKeys,s.cpuC);
+  s.gpuOK=temperatureHeadline(gpu,true,s.gpuC);
+  return s;
 }
 } // namespace hudstats
