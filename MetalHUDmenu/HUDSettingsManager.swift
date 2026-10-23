@@ -98,19 +98,27 @@ class HUDSettingsManager: ObservableObject {
 
     func applySettings() {
         if hudEnabled {
-            runLaunchctl(["setenv",
-                          "MTL_HUD_ENABLED", "1",
-                          "MTL_HUD_ELEMENTS", selectedElements.sorted().joined(separator: ","),
-                          "MTL_HUD_OPACITY", String(format: "%.3f", opacity),
-                          "MTL_HUD_SCALE", String(format: "%.3f", scale),
-                          "MTL_HUD_ALIGNMENT", alignmentValue(for: alignment)])
+            publish([("MTL_HUD_ENABLED", "1"),
+                     ("MTL_HUD_ELEMENTS", selectedElements.sorted().joined(separator: ",")),
+                     ("MTL_HUD_OPACITY", String(format: "%.3f", opacity)),
+                     ("MTL_HUD_SCALE", String(format: "%.3f", scale)),
+                     ("MTL_HUD_ALIGNMENT", alignmentValue(for: alignment))])
         } else {
             disableHUD()
         }
     }
 
+    /// "0" rather than unset, so a launcher still carrying an older "1" can't turn the HUD back on.
     func disableHUD() {
-        runLaunchctl(["unsetenv", "MTL_HUD_ENABLED"])
+        publish([("MTL_HUD_ENABLED", "0")])
+    }
+
+    /// Puts the HUD settings in the login session for newly launched apps, and saves the same values
+    /// for the launch wrapper and the stats helper: a launcher started before this (Steam, Heroic)
+    /// would otherwise hand its games its own older copy.
+    private func publish(_ environment: [(String, String)]) {
+        runLaunchctl(["setenv"] + environment.flatMap { [$0.0, $0.1] })
+        UserDefaults.standard.set(Dictionary(environment, uniquingKeysWith: { $1 }), forKey: "appliedHUDEnvironment")
     }
 
     func applyOnBootIfNeeded() {

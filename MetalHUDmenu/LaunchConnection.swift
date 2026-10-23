@@ -29,6 +29,7 @@ struct LaunchConnection: Codable, Identifiable, Equatable {
         environment["MTL_HUD_SCALE"] = String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), scale)
         environment["MTL_HUD_OPACITY"] = String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), opacity)
         environment["MTL_HUD_ALIGNMENT"] = alignment
+        environment["MHUD_HUD_EXPLICIT"] = "1" // these live settings win over the helper's saved Apply
         return environment
     }
 }

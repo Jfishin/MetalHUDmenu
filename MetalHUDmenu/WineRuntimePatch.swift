@@ -2,27 +2,11 @@ import Foundation
 import CryptoKit
 import AppKit
 
-/// Verified CrossOver runtime patches: a weak dylib dependency in existing
-/// header padding. No code, exports, section offsets, or loader entitlements change.
+/// Wine runtime patches (CrossOver, NotProton, Sikarugir, Heroic's Wine): a weak dylib dependency
+/// in existing header padding. No code, exports, section offsets, or loader entitlements change.
 enum WineRuntimePatch {
     static let dependency = "@loader_path/MHUD.dylib"
     static let knownArchitectures = ["aarch64-unix", "x86_64-unix"]
-    static let verifiedBuilds: [String: [String: String]] = [
-      "NotProton 27.0.0.41073": [
-        "aarch64-unix": "56f1ba0f2e3dc2fd6ce2c8097239841ce2da862b483a6254de528517ce7d7f16",
-        "x86_64-unix": "6fecabeb0d684e8f3a9bb4dba9b21692ee603103773c58c08dd06d7d26eff40e"
-      ],
-      "CrossOver Preview 27.0.0.41073": [
-        "aarch64-unix": "56f1ba0f2e3dc2fd6ce2c8097239841ce2da862b483a6254de528517ce7d7f16",
-        "x86_64-unix": "ad1c19b3e61b47b2ee8b21ce7d46b1170233b96f7f1022057540e8b72350ff55"
-      ],
-      "CrossOver 26.3.0.39832": [
-        "x86_64-unix": "a46e1c63a5096210626d64ef6c62ddea7632f95dbcf437b1a3bf006d43dcf532"
-      ]
-    ]
-    static func verifiedBuild(_ hashes: [String: String]) -> String? {
-        verifiedBuilds.first { $0.value == hashes }?.key
-    }
     struct Failure: LocalizedError {
         let detail: String
         var errorDescription: String? { detail }
@@ -41,8 +25,8 @@ enum WineRuntimePatch {
         if !condition { throw Failure(detail: message) }
     }
 
-    /// Thin, little-endian 64-bit Mach-O only. Refuse nonzero padding and any
-    /// existing dependency. Caller pins production inputs to the verified hashes.
+    /// Thin, little-endian 64-bit Mach-O only. Refuse nonzero padding and any existing dependency.
+    /// ponytail: structure checks, no build list; checked on CrossOver 24-27, Sikarugir and Gcenx Wine 11.
     static func addingDependency(to original: Data) throws -> Data {
         func word(_ offset: Int) throws -> UInt32 {
             try require(offset >= 0 && offset <= original.count - 4, "Truncated Mach-O header.")
@@ -99,33 +83,32 @@ enum WineRuntimePatch {
     static var runners: URL {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/notproton/runners")
     }
-    static let standaloneRoots = ["/Applications/CrossOver.app", "/Applications/CrossOver Preview.app"].map {
-        URL(fileURLWithPath: $0).appendingPathComponent("Contents/SharedSupport/CrossOver")
-    }
-    private static func application(_ root: URL) -> URL {
-        root.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-    }
-    /// Selection identifies the application; connect separately verifies every library hash.
+    static let standaloneApps = ["/Applications/CrossOver.app", "/Applications/CrossOver Preview.app"].map(URL.init(fileURLWithPath:))
+    /// A CrossOver or Sikarugir app, a Heroic Wine folder, a Wine folder, or a winemac.so inside one.
     static func runtimeRoot(forApplication app: URL) throws -> URL {
         let app = app.resolvingSymlinksInPath().standardizedFileURL
-        try require(app.pathExtension.lowercased() == "app"
-                    && Bundle(url: app)?.bundleIdentifier == "com.codeweavers.CrossOver",
-                    "Choose a CrossOver application (.app).")
-        let root = app.appendingPathComponent("Contents/SharedSupport/CrossOver")
-        try require(root.path == root.resolvingSymlinksInPath().path && !architectures(root).isEmpty,
-                    "This CrossOver app has no supported Wine runtime, or its runtime is linked outside the app.")
+        let candidates = app.lastPathComponent == "winemac.so"
+            ? [app.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()]
+            : ["", "Contents/SharedSupport/CrossOver", "Contents/SharedSupport/wine", "Contents/Resources/wine"]
+                .map { $0.isEmpty ? app : app.appendingPathComponent($0) }
+        guard let root = candidates.first(where: { !architectures($0).isEmpty }) else {
+            throw Failure(detail: "No Wine runtime found there. Choose a CrossOver or Sikarugir app, a Wine folder, or its winemac.so.")
+        }
+        try require(root.path == root.resolvingSymlinksInPath().path, "This Wine runtime is linked from elsewhere; choose the original.")
         return root
     }
+    /// Everything except a NotProton runner, whose backups stay inside it.
     static func isStandalone(_ root: URL) -> Bool {
-        (try? runtimeRoot(forApplication: application(root)).path) == root.standardizedFileURL.path
+        !root.resolvingSymlinksInPath().path.hasPrefix(runners.resolvingSymlinksInPath().path + "/")
     }
     static func displayName(_ root: URL) -> String {
-        if isStandalone(root) {
-            let app = application(root)
-            let version = Bundle(url: app)?.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
-            return app.deletingPathExtension().lastPathComponent + " " + version
-        }
-        return "NotProton: " + root.deletingLastPathComponent().lastPathComponent
+        guard isStandalone(root) else { return "NotProton: " + root.deletingLastPathComponent().lastPathComponent }
+        // The bundle around the runtime (CrossOver.app, a Sikarugir wrapper, Heroic's Wine-11.9), else the folder.
+        let parts = root.pathComponents
+        let bundle = parts.lastIndex(of: "Contents").map { URL(fileURLWithPath: NSString.path(withComponents: Array(parts[..<$0]))) } ?? root
+        let version = Bundle(url: bundle)?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+        let name = bundle.pathExtension == "app" ? bundle.deletingPathExtension().lastPathComponent : bundle.lastPathComponent
+        return version.isEmpty || name.contains(version) ? name : name + " " + version
     }
     private static func architectures(_ root: URL) -> [String] {
         knownArchitectures.filter { FileManager.default.fileExists(atPath: library(root, $0).path) }
@@ -148,7 +131,7 @@ enum WineRuntimePatch {
             ? ((try? FileManager.default.contentsOfDirectory(at: runners, includingPropertiesForKeys: nil)) ?? [])
             .map { $0.appendingPathComponent("CrossOver") }
             : []
-        let standalone = (standaloneRoots.map(application) + selectedApplications)
+        let standalone = (standaloneApps + selectedApplications)
             .compactMap { try? runtimeRoot(forApplication: $0) }
         return Array(Set((notProton + standalone).map { $0.resolvingSymlinksInPath().standardizedFileURL }))
             .filter { !architectures($0).isEmpty && (try? validateRoot($0)) != nil }
@@ -167,8 +150,6 @@ enum WineRuntimePatch {
         let expected = architectures(root)
         try require(!expected.isEmpty && Set(value.entries.map(\.architecture)) == Set(expected) && value.entries.count == expected.count,
                     "Invalid runtime backup record.")
-        try require(verifiedBuild(Dictionary(uniqueKeysWithValues: value.entries.map { ($0.architecture, $0.original) })) != nil,
-                    "Unverified runtime backup identity.")
         return value
     }
     static func isConnected(_ root: URL) -> Bool {
@@ -186,10 +167,9 @@ enum WineRuntimePatch {
         FileManager.default.fileExists(atPath: backupDir(root).appendingPathComponent("manifest.json").path)
     }
     private static func validateRoot(_ root: URL) throws {
-        let base = runners.resolvingSymlinksInPath().path + "/"
-        let standalone = isStandalone(root) && root.standardizedFileURL.path == root.resolvingSymlinksInPath().path
-        try require(standalone || (root.resolvingSymlinksInPath().path.hasPrefix(base) && root.lastPathComponent == "CrossOver"),
-                    "Choose a discovered NotProton or CrossOver runtime.")
+        try require(isStandalone(root) ? root.standardizedFileURL.path == root.resolvingSymlinksInPath().path
+                                       : root.lastPathComponent == "CrossOver",
+                    "Choose a discovered NotProton runtime or an added Wine runtime.")
     }
     private static func validateLibrary(_ target: URL, root: URL) throws {
         let attributes = try target.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
@@ -228,8 +208,7 @@ enum WineRuntimePatch {
             let source = prior == nil ? library(root, arch) : backup.appendingPathComponent(arch + ".so")
             originals[arch] = try hash(Data(contentsOf: source))
         }
-        try require(verifiedBuild(originals) != nil,
-                    "Unverified runtime build. Only the verified 26.3 and 27 Preview builds are supported; no installed libraries were changed.")
+        try require(!arches.isEmpty, "No Wine runtime found there.")
         var staged: [(URL, URL)] = [], entries: [Entry] = []
         defer { for (temp, _) in staged { try? fm.removeItem(at: temp) } }
         // Validate and stage all present architectures before modifying installed libraries.

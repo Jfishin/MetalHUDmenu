@@ -10,30 +10,29 @@ struct GeneralConnectionsView: View {
                 Text("Pinned Apps").font(.headline)
                 InfoTip("""
                     Drop an app here or on the menu bar icon to pin it, then launch it here to apply your HUD and Mac Stats settings. Opening a game normally does not.
-                    A warning means the app's signature blocks Mac Stats. Allow Mac Stats… in its menu re-signs it with a backup; App Store apps can't be changed.
+                    Pin an app to load Mac Stats every time it launches, from anywhere. A green dot means it's set up; a warning means it can't be (App Store app, or no room to patch) — launch it here instead.
                     """)
                 Spacer()
                 Button("Pin App…") { connections.choosePin() }
             }
             ForEach(connections.pins) { pin in
-                let signature = connections.signatures[pin.id]
+                let patch = connections.launchPatches[pin.id]
                 HStack {
                     Text(pin.name).lineLimit(1).help(pin.path)
-                    if signature == .blocked {
-                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                            .help("This app's signature blocks Mac Stats. Choose Allow Mac Stats… in its menu.")
-                    } else if signature == .restricted {
+                    if patch == .patched {
+                        Image(systemName: "circle.fill").foregroundStyle(.green).imageScale(.small)
+                            .help("Loads Mac Stats on every launch.")
+                    } else if patch == .unsupported {
                         Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.secondary)
-                            .help("This App Store app's signature blocks Mac Stats. It can't be re-signed: macOS would refuse to open it, and its iCloud and Game Center permissions only work with Apple's signature.")
+                            .help("This app can't be set to load Mac Stats on its own — an App Store app, or no room to patch. Launch it here to show stats for that launch.")
                     }
                     Spacer()
                     Button("Launch") { connections.launch(pin) }
                         .disabled(connections.launching.contains(pin.id) || connections.signing.contains(pin.id))
                     Menu {
                         Button("Edit Name & Arguments…") { editing = pin }
-                        if signature == .blocked { Button("Allow Mac Stats…") { connections.allowMacStats(pin) } }
-                        if signature == .restricted { Button("Mac Stats unavailable (App Store app)") {}.disabled(true) }
-                        if signature == .allowed { Button("Restore Original Signature") { connections.restoreSignature(pin) } }
+                        if patch == .patchable { Button("Load Mac Stats on Launch…") { connections.loadOnLaunch(pin) } }
+                        if patch == .patched { Button("Stop Loading Mac Stats") { connections.stopLoadingOnLaunch(pin) } }
                         Button("Remove Pin") { connections.remove(pin) }
                     } label: { Image(systemName: "ellipsis") }
                     .disabled(connections.signing.contains(pin.id))

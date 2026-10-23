@@ -59,7 +59,7 @@ final class StatsHelper: NSObject, ObservableObject {
                                                           name: NSWorkspace.didTerminateApplicationNotification, object: nil)
     }
 
-    // MARK: - CrossOver
+    // MARK: - Wine runtimes
 
     func refreshRunners() {
         let apps = (UserDefaults.standard.stringArray(forKey: "crossOverApplications") ?? []).map { URL(fileURLWithPath: $0) }
@@ -70,8 +70,8 @@ final class StatsHelper: NSObject, ObservableObject {
     func setRunner(_ root: URL, connected: Bool) {
         if connected && WineRuntimePatch.isStandalone(root) {
             let alert = NSAlert()
-            alert.messageText = "Modify this CrossOver runtime?"
-            alert.informativeText = "This enables Mac Stats for all bottles using this app. It changes signed app contents, so macOS or CrossOver may reject the modified app. Disconnect restores the original libraries; backups stay outside the app. No loader entitlements are changed. Quit this CrossOver app and its games before connecting or disconnecting."
+            alert.messageText = "Modify this Wine runtime?"
+            alert.informativeText = "This enables Mac Stats for every game using this runtime. It changes signed app contents, so macOS or the app may reject the modified app. Restore puts the original libraries back; backups stay outside the app. No loader entitlements are changed. Quit the app and its games before connecting or restoring."
             alert.addButton(withTitle: "Connect Runtime")
             alert.addButton(withTitle: "Cancel")
             guard alert.runModal() == .alertFirstButtonReturn else { return }
@@ -86,22 +86,21 @@ final class StatsHelper: NSObject, ObservableObject {
         refreshRunners()
     }
 
-    func addCrossOver() {
+    func addRuntime() {
         let panel = NSOpenPanel()
-        panel.title = "Choose a CrossOver application"
-        panel.allowedContentTypes = [.applicationBundle]
-        panel.canChooseDirectories = false
+        panel.title = "Choose a Wine app, its Wine folder, or its winemac.so"
+        panel.allowedContentTypes = [.applicationBundle, .folder, .data]
+        panel.canChooseDirectories = true
         panel.canChooseFiles = true
         panel.allowsMultipleSelection = false
         panel.directoryURL = URL(fileURLWithPath: "/Applications")
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
             let root = try WineRuntimePatch.runtimeRoot(forApplication: url)
-            let app = root.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            let paths = Set((UserDefaults.standard.stringArray(forKey: "crossOverApplications") ?? []) + [app.path])
+            let paths = Set((UserDefaults.standard.stringArray(forKey: "crossOverApplications") ?? []) + [root.path])
             UserDefaults.standard.set(paths.sorted(), forKey: "crossOverApplications")
             refreshRunners()
-            runtimeStatus = "Added \(app.deletingPathExtension().lastPathComponent). Connect checks its exact runtime version before modifying it."
+            runtimeStatus = "Added \(WineRuntimePatch.displayName(root)). Connect checks its library has room before changing it."
         } catch { runtimeStatus = error.localizedDescription }
     }
 

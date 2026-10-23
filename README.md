@@ -26,7 +26,7 @@ A tiny macOS utility that configures Apple’s **Metal Performance HUD** system-
 4. Choose **Alignment**.
 5. Click **Apply**
 
-**Tip: HUD settings are applied via environment variables and affect **newly launched** processes.**
+**Tip: HUD settings are applied via environment variables and affect **newly launched** processes.** Games started through the Mac Stats launch option, a pin, or a patched app always use your last **Apply**, even if their launcher (Steam, Heroic) was opened before it; other apps opened from a launcher that was already running keep the settings it started with until you restart that launcher.
 
 ## Mac Stats (beta)
 
@@ -35,8 +35,8 @@ Adds live Mac readings to the HUD in games: CPU/GPU usage and clocks, Neural Eng
 1. Open the **Mac Stats** tab, turn on **Enable Mac Stats**, and tick the stats you want. Games with the helper already loaded update within a second.
 2. Get the helper into the game one of three ways (all in the **Games** tab):
    - **Launch Option:** copy it and paste it into the game's launch options in your launcher. Steam: right-click the game → Properties → Launch Options (`"…/mhud-run" %command%`). Heroic and similar launchers: paste the wrapper path into the game's wrapper command.
-   - **Pinned Apps:** pin a standalone app with **Pin App…**, or drop it on the menu bar icon or into the menu, and launch it from there.
-   - **NotProton / CrossOver:** connect the Wine runtime once (below).
+   - **Pinned Apps:** pin a standalone app with **Pin App…**, or drop it on the menu bar icon or into the menu. Choose **Load Mac Stats on Launch…** in its menu so it loads Mac Stats however it is opened, or launch it from the pin each time.
+   - **NotProton / CrossOver / other Wine:** connect the Wine runtime once (below).
 3. Launch the game with the HUD on. On macOS 27 your stats appear in the HUD's **Custom Metrics** section, lined up with Apple's rows. Temperatures turn yellow at 65 °C and red at 85 °C, and memory and thermal pressure show their level in color; everything else stays white. If a macOS update changes that private HUD feature, the stats fall back to **State Reporters → Mac Stats** (white, indented) until MetalHUDmenu is updated.
 
 - Older versions added the wrapper to every Steam game automatically. If yours did, **Games → Launch Option → Remove** takes it back out of every game (Steam restarts once if open; a backup of Steam's config is kept next to it as `localconfig.vdf.metalhudmenu-backup`).
@@ -49,18 +49,21 @@ Adds live Mac readings to the HUD in games: CPU/GPU usage and clocks, Neural Eng
 - **CPU temperature** is the hottest CPU core and **GPU temperature** the hottest GPU cluster, matching TG Pro on an M4 Max. Other chips show the average of the CPU sensors until their core sensors are verified.
 - **ANE usage** is estimated from the Neural Engine's memory-bandwidth requests; its energy counter reads 0 on macOS 27. MetalFX upscaling is expected to run on the GPU, so ANE usage near 0 in a MetalFX game is plausible; the row lets you check.
 
-### NotProton and CrossOver
+### NotProton, CrossOver and other Wine runtimes
 
 - **NotProton** appears only when its app and a runtime are installed. One runtime folder can serve **both ARM64/FEX and Rosetta**; the folder's `-fex` name does not mean Rosetta is missing.
-- **CrossOver → Add App…** selects a CrossOver app anywhere on disk. Connect verifies its exact build, backs up the originals, and adds the helper to its Wine Mac graphics driver. One connection covers all bottles using that runtime; there is no per-bottle setup.
-- Current verified profiles: CrossOver **26.3.0.39832**, Preview **27.0.0.41073**, and NotProton's modified **27.0.0.41073** runner. Other builds are refused, not patched blindly.
+- **Wine Runtimes → Add…** takes any Wine runtime: a CrossOver or Sikarugir app, a Heroic Wine folder, a Wine folder, or the `winemac.so` inside it. Connect checks the library's layout and that it has room, backs up the originals, and adds the helper to its Wine Mac graphics driver. One connection covers every game and bottle using that runtime; there is no per-bottle setup or environment variable.
+- No version list: the patch fits CrossOver 24, 25, 26.2, 26.3 and 27 Preview, NotProton 27, Sikarugir wrappers and Gcenx Wine 11 / Staging builds. A library without room is refused and left unchanged. A runtime update replaces the patched file, so connect again after updating.
 - **Restore** puts the original driver files back. Quit affected games first. Standalone backups live under `~/Library/Application Support/MetalHUDmenu/RuntimeBackups`; NotProton backups remain inside its runtime's `.metalhudmenu-backup` folder.
-- Modifying a standalone CrossOver app invalidates its outer resource signature until restored. The app warns before connecting. Loader signatures/entitlements are not changed; no blanket re-signing is performed. These standalone paths have passed staging/recovery tests, but still need in-game validation before a broad release claim.
+- Modifying a Wine app invalidates its outer resource signature until restored. The app warns before connecting. Only `winemac.so` is re-signed (ad hoc); Wine's loader keeps its signature and entitlements. Every loader checked either isn't hardened (Sikarugir, Gcenx Wine) or is CrossOver's, which already turns off library validation, so the helper loads without loosening anything. Confirmed in game with NotProton and a Sikarugir wrapper.
+- A connected runtime also applies your HUD settings: some wrappers set `MTL_HUD_ENABLED=0` themselves (Sikarugir does when its own Metal HUD option is off), and the helper re-applies your last **Apply** as it loads, before Apple's HUD reads it.
 
 ### Pinned Apps
 
 - **Games → Pin App…** selects a standalone Mac app or executable. Launch it from the menu-bar popover with the current HUD settings and stats helper. The pin's menu edits its name and literal arguments (one per line), or removes the pin without deleting the game.
-- A warning triangle on a pin means the app's signature blocks libraries added at launch (hardened runtime without the DYLD and library-validation exceptions; Dolphin and DREDGE, for example). Mac App Store apps (DREDGE, for example) are not supported: they carry permissions only Apple's signature can grant, so they show a grey warning and are never re-signed. For other apps, **Allow Mac Stats…** in the pin's menu re-signs that app on this Mac with its own entitlements plus those two, after keeping an APFS clone under `~/Library/Application Support/MetalHUDmenu/SignatureBackups`. The app then no longer carries its developer's signature, macOS may ask you to approve it once, and an app update undoes the change. **Restore Original Signature** swaps the backup back and moves the re-signed copy to the Trash; it refuses if the app changed since (an update). If macOS blocks the change, allow MetalHUDmenu under Privacy & Security → App Management.
+- **Load Mac Stats on Launch…** in a pin's menu makes the app load Mac Stats every time it starts, from the Dock, Finder or Spotlight, with no pin launch or environment variable. It adds a weak reference to the helper in spare header space of the app's executable: nothing in the code moves, and a missing helper never stops the app from opening. A launch environment can't do this on its own, because hardened apps drop `DYLD_INSERT_LIBRARIES` and only a launch through the pin sets it.
+- Before patching it keeps an APFS clone of the app under `~/Library/Application Support/MetalHUDmenu/LaunchPatches`, then re-signs the app on this Mac (ad hoc). Hardened apps also get `disable-library-validation` so they accept the helper; no DYLD exception is added. A green dot shows it's set. The app no longer carries its developer's signature, and an app update undoes the patch. **Stop Loading Mac Stats** swaps the original back and moves the patched copy to the Trash; it refuses if the app changed since (an update). If macOS blocks the change, allow MetalHUDmenu under Privacy & Security → App Management.
+- A grey warning means the app can't be patched: a Mac App Store app (its permissions only work under Apple's signature, so it is never re-signed) or an executable with no spare header space. Launch it from the pin instead.
 - Quit an already-running app before launching through its pin. Opening the game normally does not apply the pin's launch environment. Protected apps may reject helper injection; no app-signing protections are disabled.
 
 The Mac Stats master toggle stops reporting without forgetting selected rows. Restart with it off for a clean launch without our reporter; a game started with it off may need restarting after enabling. Removing the Steam launch option does not disable an independently connected Wine runtime or unload a helper from an already-running game.

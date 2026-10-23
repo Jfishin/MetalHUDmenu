@@ -59,19 +59,8 @@ assert(SteamLaunchOptions.edit(localConfig: "\"a\" { b }", remove) == nil, "unqu
 
 print("SteamLaunchOptions: all checks passed")
 
-let stable = WineRuntimePatch.verifiedBuilds["CrossOver 26.3.0.39832"]!
-let preview = WineRuntimePatch.verifiedBuilds["CrossOver Preview 27.0.0.41073"]!
-assert(WineRuntimePatch.verifiedBuild(stable) != nil && stable.count == 1)
-assert(WineRuntimePatch.verifiedBuild(preview) != nil && preview.count == 2)
-var mixed = preview
-mixed["x86_64-unix"] = stable["x86_64-unix"]
-assert(WineRuntimePatch.verifiedBuild(mixed) == nil, "mixed runtime versions must be rejected")
-assert(WineRuntimePatch.verifiedBuild([:]) == nil)
-assert(WineRuntimePatch.verifiedBuild(["x86_64-unix": "unknown"]) == nil)
-assert(WineRuntimePatch.verifiedBuild(["aarch64-unix": preview["aarch64-unix"]!]) == nil,
-       "missing architecture must not silently produce a partial connection")
 for malformed in [Data(), Data(repeating: 0, count: 128)] {
     do { _ = try WineRuntimePatch.addingDependency(to: malformed); assertionFailure("invalid binary accepted") }
     catch { }
 }
-print("WineRuntimePatch: profile and rejection checks passed")
+print("WineRuntimePatch: rejection checks passed")

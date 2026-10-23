@@ -7,8 +7,8 @@ final class GeneralConnections: ObservableObject {
     @Published private(set) var pins: [LaunchConnection] = []
     @Published var status = ""
     @Published private(set) var launching: Set<UUID> = []
-    /// Whether each pin's code signature lets the helper load at launch.
-    @Published private(set) var signatures: [UUID: AppSignature.State] = [:]
+    /// Whether each pinned app can load Mac Stats on every launch (patched, patchable, or unsupported).
+    @Published private(set) var launchPatches: [UUID: NativePatch.State] = [:]
     @Published private(set) var signing: Set<UUID> = []
     private var processes: [UUID: Process] = [:]
     private var canSave = true
@@ -73,38 +73,42 @@ final class GeneralConnections: ObservableObject {
     }
 
     func refreshSignatures() {
-        signatures = Dictionary(uniqueKeysWithValues: pins.map { ($0.id, AppSignature.state($0.url)) })
+        let helper = StatsHelper.library.path
+        launchPatches = Dictionary(uniqueKeysWithValues: pins.map { ($0.id, NativePatch.state($0.url, helper: helper)) })
     }
 
-    /// Re-signs a pinned app whose signature strips the helper, after the person confirms.
-    func allowMacStats(_ pin: LaunchConnection) {
-        guard !isRunning(pin) else { status = "Quit \(pin.name) first, then allow Mac Stats."; return }
+    /// Patches a pinned app to load Mac Stats on every launch, however it is started, after confirmation.
+    func loadOnLaunch(_ pin: LaunchConnection) {
+        guard !isRunning(pin) else { status = "Quit \(pin.name) first, then set it to load Mac Stats."; return }
+        guard StatsHelper.shared.installFiles() else { status = "Couldn't install the Mac Stats helper."; return }
         let alert = NSAlert()
-        alert.messageText = "Allow Mac Stats in \(pin.name)?"
+        alert.messageText = "Load Mac Stats in \(pin.name) on every launch?"
         alert.informativeText = """
-            \(pin.name)'s signature blocks libraries added at launch, so Mac Stats can't load. MetalHUDmenu can \
-            re-sign it on this Mac with that permission (and permission to load other developers' libraries) \
-            added, after keeping a backup copy.
+            MetalHUDmenu adds a reference to the Mac Stats helper inside \(pin.name) and re-signs it on this \
+            Mac, after keeping a backup copy. The game then shows stats whenever you launch it — from the Dock, \
+            a launcher or here — with no further setup.
 
-            The app will no longer carry its developer's signature. macOS may ask you to approve it once in \
-            Privacy & Security, and an app update undoes the change. Restore Original Signature puts the backup back.
+            The app no longer carries its developer's signature, macOS may ask you to approve it once, and an \
+            app update undoes it. "Stop Loading Mac Stats" puts the original back. Keep MetalHUDmenu running so \
+            sandboxed games can read the sensors.
             """
-        alert.addButton(withTitle: "Re-sign App")
+        alert.addButton(withTitle: "Patch App")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        changeSignature(pin, working: "Re-signing \(pin.name)…") {
-            try AppSignature.allow($0)
-            return "\(pin.name) can load Mac Stats now. Launch it here."
+        let helper = StatsHelper.library.path
+        changeSignature(pin, working: "Patching \(pin.name)…") {
+            try NativePatch.connect($0, helper: helper)
+            return "\(pin.name) now loads Mac Stats on every launch."
         }
     }
 
-    func restoreSignature(_ pin: LaunchConnection) {
-        guard !isRunning(pin) else { status = "Quit \(pin.name) first, then restore its signature."; return }
+    func stopLoadingOnLaunch(_ pin: LaunchConnection) {
+        guard !isRunning(pin) else { status = "Quit \(pin.name) first, then stop loading Mac Stats."; return }
         changeSignature(pin, working: "Restoring \(pin.name)…") {
-            guard let leftover = try AppSignature.restore($0) else {
-                return "\(pin.name)'s original signature is back. The re-signed copy is in the Trash."
+            guard let leftover = try NativePatch.restore($0) else {
+                return "\(pin.name) is back to its original. The patched copy is in the Trash."
             }
-            return "\(pin.name)'s original signature is back. Delete the re-signed copy yourself: \(leftover.path)"
+            return "\(pin.name) is back to its original. Delete the patched copy yourself: \(leftover.path)"
         }
     }
 
@@ -126,10 +130,10 @@ final class GeneralConnections: ObservableObject {
     }
 
     private func launchedMessage(_ pin: LaunchConnection) -> String {
-        switch signatures[pin.id] {
-        case .blocked: return "Launched \(pin.name) without Mac Stats: its signature blocks them. Choose Allow Mac Stats… in its menu."
-        case .restricted: return "Launched \(pin.name) without Mac Stats: its App Store signature blocks them and can't be changed."
-        default: return "Launched \(pin.name). Check the game HUD for stats."
+        switch launchPatches[pin.id] {
+        case .patched: return "Launched \(pin.name). It loads Mac Stats on its own now."
+        case .unsupported: return "Launched \(pin.name) with Mac Stats for this launch. It can't be set to load them on its own (App Store app, or no room to patch)."
+        default: return "Launched \(pin.name). Choose Load Mac Stats on Launch… in its menu to make this automatic."
         }
     }
 

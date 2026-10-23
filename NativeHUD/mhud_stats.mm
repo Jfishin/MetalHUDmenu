@@ -393,6 +393,23 @@ void appendEnv(const char *key,const char *token) {
   setenv(key,(std::string(cur)+","+token).c_str(),1);
 }
 
+// A launcher started before MetalHUDmenu's last Apply (Steam, Heroic) hands its games an older copy of
+// the HUD settings. Use the ones Apply saved instead. Runs before Apple's HUD reads them. Pin launches
+// already pass the live settings (MHUD_HUD_EXPLICIT); sandboxed apps can't read the saved ones.
+void refreshHUDEnvironment() {
+  if(getenv("MHUD_HUD_EXPLICIT")) return;
+  CFPreferencesAppSynchronize(kPrefsApp);
+  id saved=CFBridgingRelease(CFPreferencesCopyAppValue(CFSTR("appliedHUDEnvironment"),kPrefsApp));
+  if(![saved isKindOfClass:NSDictionary.class]) return;
+  for(id key in (NSDictionary *)saved) {
+    id value=((NSDictionary *)saved)[key];
+    // Only Apple's HUD settings: this path must never be able to set anything else.
+    if(![key isKindOfClass:NSString.class]||![key hasPrefix:@"MTL_HUD_"]||![value isKindOfClass:NSString.class]) continue;
+    if(debug) fprintf(stderr,"MHUD_STATS %s=%s (was %s)\n",[key UTF8String],[value UTF8String],getenv([key UTF8String])?:"<unset>");
+    setenv([key UTF8String],[value UTF8String],1);
+  }
+}
+
 bool insideMetalHUDmenu() {
   CFBundleRef bundle=CFBundleGetMainBundle();
   CFStringRef identifier=bundle?CFBundleGetIdentifier(bundle):nullptr;
@@ -432,6 +449,7 @@ __attribute__((constructor)) static void start() {
   debug=getenv("MHUD_DEBUG")&&!strcmp(getenv("MHUD_DEBUG"),"1");
   if(debug) fprintf(stderr,"MHUD_STATS_LOADED pid=%d\n",getpid());
   wineMilestone("helper-loaded");
+  refreshHUDEnvironment();
   // Adds the Custom Metrics ("client") and State Reporters sections on top of the user's own HUD rows
   // (read when Apple's HUD loads). Rows go to Custom Metrics; State Reporters is the fallback.
   if(@available(macOS 27.0,*)) {

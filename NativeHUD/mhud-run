@@ -3,6 +3,12 @@
 # Adds the Mac stats library to the game and keeps Steam's own overlay libraries.
 lib="$(cd "$(dirname "$0")" && pwd)/libMHUDStats.dylib"
 [ "$#" -gt 0 ] || { echo 'Usage: mhud-run command [arguments…]' >&2; exit 64; }
+# A launcher started before MetalHUDmenu's last Apply (Steam, Heroic) passes its own older HUD
+# settings along. Take the current ones from the login session; leave any the session doesn't set.
+for key in MTL_HUD_ENABLED MTL_HUD_ELEMENTS MTL_HUD_OPACITY MTL_HUD_SCALE MTL_HUD_ALIGNMENT; do
+  value="$(/bin/launchctl getenv "$key" 2>/dev/null)"
+  [ -n "$value" ] && export "$key=$value"
+done
 # A missing helper must not stop a game or app bundle from launching.
 if [ ! -r "$lib" ]; then
   case "$1" in

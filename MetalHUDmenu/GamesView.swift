@@ -42,12 +42,12 @@ struct GamesView: View {
 
                 Divider()
                 HStack {
-                    Text("CrossOver").font(.headline)
-                    InfoTip("One connection covers all bottles using that app. Connect checks the app's exact build first and refuses unknown ones. Restore puts the original runtime files back.")
+                    Text("Wine Runtimes").font(.headline)
+                    InfoTip("CrossOver, Sikarugir, Heroic's Wine or any Wine build. Add… takes the app, its Wine folder or its winemac.so. One connection covers every game and bottle using that runtime. Restore puts the original files back; a runtime update also undoes it.")
                     Spacer()
                     Button { helper.refreshRunners() } label: { Image(systemName: "arrow.clockwise") }
                         .help("Refresh runtimes")
-                    Button("Add App…") { helper.addCrossOver() }
+                    Button("Add…") { helper.addRuntime() }
                 }
                 ForEach(crossOver, id: \.path) { root in runtimeRow(root) }
                 if !helper.runtimeStatus.isEmpty { caption(helper.runtimeStatus) }
@@ -84,9 +84,13 @@ struct GamesView: View {
 
     private func runtimeRow(_ root: URL) -> some View {
         HStack(alignment: .top) {
-            Text(WineRuntimePatch.displayName(root)).lineLimit(2).help(root.path)
-            Spacer()
             let connected = helper.connectedRunners.contains(root.path)
+            Text(WineRuntimePatch.displayName(root)).lineLimit(2).help(root.path)
+            if connected {
+                Image(systemName: "circle.fill").foregroundStyle(.green).imageScale(.small)
+                    .help("Connected: games using this runtime load Mac Stats.")
+            }
+            Spacer()
             Button(connected ? "Restore" : "Connect") { helper.setRunner(root, connected: !connected) }
                 .contextMenu {
                     if WineRuntimePatch.hasRecoveryRecord(root) {

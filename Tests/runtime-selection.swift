@@ -35,15 +35,28 @@ import Foundation
         assert(discovered.allSatisfy(WineRuntimePatch.isStandalone))
         print("PASS arbitrary app selection, canonical discovery, deduplication and disabled NotProton")
 
-        let impostor = scratch.appendingPathComponent("Impostor.app")
-        _ = try app(at: impostor, identifier: "example.impostor")
-        try expectFailure("non-CrossOver app rejected") { _ = try WineRuntimePatch.runtimeRoot(forApplication: impostor) }
+        let wrapper = scratch.appendingPathComponent("Sikarugir Wrapper.app/Contents/SharedSupport/wine/lib/wine/x86_64-unix")
+        try fm.createDirectory(at: wrapper, withIntermediateDirectories: true)
+        try Data().write(to: wrapper.appendingPathComponent("winemac.so"))
+        let wrapperRoot = scratch.appendingPathComponent("Sikarugir Wrapper.app/Contents/SharedSupport/wine").path
+        for pick in ["Sikarugir Wrapper.app", "Sikarugir Wrapper.app/Contents/SharedSupport/wine",
+                     "Sikarugir Wrapper.app/Contents/SharedSupport/wine/lib/wine/x86_64-unix/winemac.so"] {
+            let found = try WineRuntimePatch.runtimeRoot(forApplication: scratch.appendingPathComponent(pick))
+            assert(found.path == wrapperRoot, "\(pick) -> \(found.path)")
+        }
+        assert(WineRuntimePatch.displayName(URL(fileURLWithPath: wrapperRoot)) == "Sikarugir Wrapper")
+        print("PASS any Wine app, folder or winemac.so selects the same runtime")
+        let empty = scratch.appendingPathComponent("No Wine.app/Contents")
+        try fm.createDirectory(at: empty, withIntermediateDirectories: true)
+        try expectFailure("app without a Wine runtime rejected") {
+            _ = try WineRuntimePatch.runtimeRoot(forApplication: empty.deletingLastPathComponent())
+        }
         let helper = scratch.appendingPathComponent("helper.dylib")
         try Data("fixture helper; never loaded".utf8).write(to: helper)
-        try expectFailure("selected app still requires full verified build hashes") { try WineRuntimePatch.connect(root, helper: helper) }
+        try expectFailure("non-Mach-O library refused before any change") { try WineRuntimePatch.connect(root, helper: helper) }
         assert(!WineRuntimePatch.hasRecoveryRecord(root))
 
-        // Use each installed stock build only as a read-only fixture source.
+        // Use each installed build only as a read-only fixture source; any Wine build works, so no list.
         for sourceApp in ["CrossOver.app", "CrossOver Preview.app"] {
             let sourceRoot = URL(fileURLWithPath: "/Applications/\(sourceApp)/Contents/SharedSupport/CrossOver")
             guard fm.fileExists(atPath: sourceRoot.path) else { print("SKIP missing \(sourceApp)"); continue }
@@ -59,12 +72,13 @@ import Foundation
                 let source = sourceRoot.appendingPathComponent(relative)
                 guard fm.fileExists(atPath: source.path) else { continue }
                 let original = try Data(contentsOf: source)
+                guard original.range(of: Data(WineRuntimePatch.dependency.utf8)) == nil else { continue } // already connected
                 originals[arch] = original
                 let target = fixtureRoot.appendingPathComponent(relative)
                 try fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
                 try original.write(to: target)
             }
-            let firstArch = originals.keys.sorted()[0]
+            guard let firstArch = originals.keys.sorted().first else { print("SKIP \(sourceApp) is connected"); continue }
             let target = fixtureRoot.appendingPathComponent("lib/wine/\(firstArch)/winemac.so")
             let link = target.deletingLastPathComponent().appendingPathComponent("MHUD.dylib")
             try fm.createSymbolicLink(atPath: link.path, withDestinationPath: helper.path)
