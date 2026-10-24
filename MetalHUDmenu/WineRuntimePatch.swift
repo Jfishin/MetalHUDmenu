@@ -200,7 +200,17 @@ enum WineRuntimePatch {
         let fm = FileManager.default, backup = backupDir(root)
         try require(fm.isReadableFile(atPath: helper.path), "Install the Mac Stats helper first.")
         let manifest = backup.appendingPathComponent("manifest.json")
-        let prior = fm.fileExists(atPath: manifest.path) ? try record(root) : nil
+        var prior = fm.fileExists(atPath: manifest.path) ? try? record(root) : nil
+        let known = Set((prior?.entries ?? []).flatMap { [$0.original, $0.patched] })
+        let installed = try architectures(root).map { try Data(contentsOf: library(root, $0)) }
+        let updated = fm.fileExists(atPath: manifest.path) && installed.allSatisfy { !known.contains(hash($0)) }
+        if updated {
+            // A runtime update replaced winemac.so, so the backup holds the older version. Start over from the
+            // new files (refused if any is already patched) so Restore never puts an older library back.
+            for data in installed { _ = try addingDependency(to: data) }
+            try fm.removeItem(at: backup)
+            prior = nil
+        }
         if let prior { try require(prior.helper == helper.path, "The recorded helper location differs; disconnect first.") }
         let arches = architectures(root)
         var originals: [String: String] = [:]
@@ -223,7 +233,7 @@ enum WineRuntimePatch {
             if let oldEntry { try require(hash(original) == oldEntry.original, "A runtime backup changed; recovery metadata was preserved.") }
             let link = target.deletingLastPathComponent().appendingPathComponent("MHUD.dylib")
             if let destination = try? fm.destinationOfSymbolicLink(atPath: link.path) {
-                try require(prior != nil && destination == helper.path, "An unowned MHUD.dylib link already exists; it was preserved.")
+                try require((prior != nil || updated) && destination == helper.path, "An unowned MHUD.dylib link already exists; it was preserved.")
             } else { try require(!fm.fileExists(atPath: link.path), "An unrelated MHUD.dylib file already exists.") }
             let temp = target.deletingLastPathComponent().appendingPathComponent(".mhud-\(UUID().uuidString).so")
             staged.append((temp, target))
@@ -267,7 +277,7 @@ enum WineRuntimePatch {
             try require(try hash(Data(contentsOf: backupDir(root).appendingPathComponent(entry.architecture + ".so"))) == entry.original,
                         "A runtime backup changed; refusing to restore it.")
             let current = try hash(Data(contentsOf: library(root, entry.architecture)))
-            try require([entry.original, entry.patched].contains(current), "The runtime updated \(entry.architecture); refusing to overwrite the newer library.")
+            try require([entry.original, entry.patched].contains(current), "The runtime was updated, which already removed Mac Stats from \(entry.architecture). Connect adds it to the new version.")
         }
         for entry in value.entries {
             let target = library(root, entry.architecture)

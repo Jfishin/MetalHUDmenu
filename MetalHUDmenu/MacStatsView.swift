@@ -51,9 +51,9 @@ struct MacStatsView: View {
                 Text("The Mac Stats library is missing from this app. Reinstall MetalHUDmenu.")
                     .font(.caption).foregroundStyle(.orange)
             }
-            if ProcessInfo.processInfo.operatingSystemVersion.majorVersion < 27 {
-                Text("Mac Stats on macOS 26 are experimental.")
-                    .font(.caption).foregroundStyle(.secondary)
+            if !StatsHelper.keepsElementPicks {
+                Text("On this version of macOS, Mac Stats rows only show with Apple's default HUD elements, so your HUD tab picks apply while Mac Stats is off.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
         }
     }

@@ -128,6 +128,26 @@ import Foundation
             }
             try WineRuntimePatch.connect(fixtureRoot, helper: helper)
             try WineRuntimePatch.disconnect(fixtureRoot)
+
+            // A runtime update replaces winemac.so (the helper link may survive): Connect starts over from the
+            // new version, and Restore then returns the new version, never the older backup.
+            try WineRuntimePatch.connect(fixtureRoot, helper: helper)
+            var updates: [String: Data] = [:]
+            for (arch, original) in originals {
+                var update = original
+                update[update.count - 1] ^= 0xff
+                updates[arch] = update
+                try update.write(to: fixtureRoot.appendingPathComponent("lib/wine/\(arch)/winemac.so"))
+            }
+            try expectFailure("restore refuses to put an older version back") { try WineRuntimePatch.disconnect(fixtureRoot) }
+            try WineRuntimePatch.connect(fixtureRoot, helper: helper)
+            assert(WineRuntimePatch.isConnected(fixtureRoot))
+            try WineRuntimePatch.disconnect(fixtureRoot)
+            for (arch, update) in updates {
+                let restored = try Data(contentsOf: fixtureRoot.appendingPathComponent("lib/wine/\(arch)/winemac.so"))
+                assert(restored == update, "restore must return the updated \(arch) library")
+            }
+            print("PASS reconnect after a runtime update backs up the new version")
             print("PASS \(sourceApp): connect, reconnect, interrupted recovery, external backups, exact restore and reuse (\(originals.count) architectures)")
         }
     }

@@ -1,5 +1,6 @@
 // MetalHUDmenu Mac stats: live system readings inside Apple's Metal HUD.
-// macOS 27+: public StateReporting API. macOS 26: the private QuartzCore label API DXMT uses.
+// Rows go through Apple's private custom-metric API when the system's HUD has it (macOS 27, maybe 26);
+// otherwise State Reporters on macOS 27, or the private QuartzCore label API DXMT uses on macOS 26.
 // MetalHUDmenu also loads this library and calls mhud_publisher_start(): it samples for games and
 // publishes the readings as notify states. Sandboxed games (App Store emulators, for example) can read
 // neither its preferences nor the sensors, but can read those. Without a fresh publisher, a game
@@ -9,6 +10,7 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <mach-o/dyld.h>
+#import <os/log.h>
 #include <array>
 #include <initializer_list>
 #include <atomic>
@@ -59,6 +61,10 @@ bool debug=false;
 // Three bounded milestones per Wine process. NotProton does not forward MHUD_*
 // diagnostics through LaunchServices, so these cannot depend on an env toggle.
 // No arguments, full environment, or game data are recorded. Stop at 1 MiB.
+// Diagnostics a tester can read: log stream --predicate 'subsystem == "com.Jfishin.MetalHUDmenu"'
+// (stderr goes nowhere for a game opened from the Dock).
+os_log_t logger() { static os_log_t log=os_log_create("com.Jfishin.MetalHUDmenu","stats"); return log; }
+
 void wineMilestone(const char *event, NSUInteger rows=0) { @autoreleasepool {
   if(!getenv("WINEPREFIX")) return;
   NSString *directory=[NSHomeDirectory() stringByAppendingPathComponent:@"Library/Logs/MetalHUDmenu"];
@@ -274,10 +280,10 @@ uint32_t valueColor(Metric m,const Reading &r) {
   }
 }
 
-// macOS 27: Apple's private custom-metric API (MTLHUDService, the one D3DMetal and DXMT call). It draws
-// flush, colored rows in our order under "Custom Metrics". Every hop is checked once; when anything is
-// missing or changed, this returns nil and the rows fall back to State Reporters (white, indented).
-API_AVAILABLE(macos(27.0)) id metricService() {
+// Apple's private custom-metric API (MTLHUDService, the one D3DMetal and DXMT call). It draws flush,
+// colored rows in our order under "Custom Metrics". Every hop is checked once; when anything is missing
+// or changed, this returns nil and the rows fall back (State Reporters on macOS 27, labels on 26).
+id metricService() {
   static id service=[]() -> id {
     if(getenv("MHUD_STATE_REPORTER")) return nil; // force the fallback, to check it after an OS update
     Class cls=objc_lookUpClass("MTLHUDService");
@@ -295,8 +301,8 @@ API_AVAILABLE(macos(27.0)) id metricService() {
   return service;
 }
 
-// False when the custom-metric API isn't usable, so the caller reports through State Reporters instead.
-API_AVAILABLE(macos(27.0)) bool reportColored(const Rows &rows) {
+// False when the custom-metric API isn't usable, so the caller falls back.
+bool reportColored(const Rows &rows) {
   static int warmup=2; // let Apple's HUD finish loading before asking for its service
   if(warmup>0) { warmup--; return true; }
   id service=metricService();
@@ -328,9 +334,10 @@ API_AVAILABLE(macos(27.0)) bool reportColored(const Rows &rows) {
   return true;
 }
 
-// macOS 26: one HUD line per stat via _CADeveloperHUDProperties (addLabel:after:, updateLabel:value:, remove:),
-// the same calls DXMT makes there. Every call is guarded; macOS 27 uses StateReporting instead.
-// ponytail: untested on a macOS 26 machine; verify layout and threading there.
+// macOS 26 fallback: one HUD line per stat via _CADeveloperHUDProperties (addLabel:after:, updateLabel:value:,
+// remove:), the same calls DXMT makes there. Every call is guarded. These lines only show while
+// MTL_HUD_ELEMENTS is unset (start() clears it when this path will be used).
+// ponytail: not run on a macOS 26 machine by us; reported working there with MTL_HUD_ELEMENTS cleared.
 void reportLegacy(NSDictionary<NSString*,NSString*> *values) {
   static NSArray<NSString*> *shown=@[];
   id hud=nil;
@@ -357,13 +364,17 @@ void tick() { @autoreleasepool {
   const bool published=!getenv("MHUD_SYSTEM_ELEMENTS")&&fetch(rows);
   if(!published) { bool on[MetricCount]; readSelection(on); rows=measure(on); }
   NSDictionary *values=format(rows);
-  bool colored=false;
-  if(@available(macOS 27.0,*)) { colored=reportColored(rows); if(!colored) reportModern(values); }
-  else reportLegacy(values);
+  const bool colored=reportColored(rows);
+  const char *route="custom-metrics";
+  if(!colored) {
+    if(@available(macOS 27.0,*)) { reportModern(values); route="state-reporter"; }
+    else { reportLegacy(values); route="labels"; }
+  }
   static bool reported=false;
   if(values.count && !reported) { wineMilestone("stats-reported",values.count); reported=true; }
-  if(debug) fprintf(stderr,"MHUD_STATS %s %s %s\n",published?"published":"local",colored?"custom-metrics":"state-reporter",
-                    values.description.UTF8String);
+  static int ticks=0; // the route is settled once reportColored's warmup is over
+  if(++ticks==3) os_log(logger(),"reporting %lu rows through %{public}s",(unsigned long)values.count,route);
+  if(debug) fprintf(stderr,"MHUD_STATS %s %s %s\n",published?"published":"local",route,values.description.UTF8String);
 } }
 
 // Runs under dyld's loader lock: only look up the image name, then start the timer.
@@ -382,6 +393,18 @@ void imageAdded(const mach_header *header,intptr_t) {
   });
   dispatch_resume(timer);
   if(debug) fprintf(stderr,"MHUD_STATS_STARTED %s\n",name);
+}
+
+// Whether this system's HUD has the custom-metric API, decided before Apple's HUD loads, so from its file.
+// ponytail: a substring check of the library on disk; MHUD_STATE_REPORTER=1 forces the fallback.
+bool customMetricsInstalled() {
+  if(getenv("MHUD_STATE_REPORTER")) return false;
+  const char *needle="insertMetric:after:name:unit:nameColor:valueColor:visualType:options:";
+  for(NSString *path in @[@"/usr/lib/libMTLHud.dylib",@"/System/Volumes/Preboot/Cryptexes/OS/usr/lib/libMTLHud.dylib"]) {
+    NSData *data=[NSData dataWithContentsOfFile:path options:NSDataReadingMappedIfSafe error:nil];
+    if(data && memmem(data.bytes,data.length,needle,strlen(needle))) return true;
+  }
+  return false;
 }
 
 // Append a token to a comma-separated env var unless it is already there.
@@ -427,6 +450,13 @@ extern "C" __attribute__((visibility("default"))) const char *mhud_catalog(void)
   return text.c_str();
 }
 
+// For MetalHUDmenu's settings: whether games here get rows through the custom-metric API (element picks
+// kept) rather than macOS 26's label fallback (Apple's default elements while Mac Stats is on).
+extern "C" __attribute__((visibility("default"))) bool mhud_custom_metrics(void) {
+  if(@available(macOS 27.0,*)) return true; // State Reporters, the 27 fallback, keeps picks too
+  return customMetricsInstalled();
+}
+
 // Called by MetalHUDmenu: samples once a second while any game's helper has pinged recently.
 extern "C" __attribute__((visibility("default"))) void mhud_publisher_start(void) {
   if(timer) return;
@@ -450,14 +480,20 @@ __attribute__((constructor)) static void start() {
   if(debug) fprintf(stderr,"MHUD_STATS_LOADED pid=%d\n",getpid());
   wineMilestone("helper-loaded");
   refreshHUDEnvironment();
-  // Adds the Custom Metrics ("client") and State Reporters sections on top of the user's own HUD rows
-  // (read when Apple's HUD loads). Rows go to Custom Metrics; State Reporters is the fallback.
-  if(@available(macOS 27.0,*)) {
-    if(statsEnabled()) {
-      appendEnv("MTL_HUD_EXTRA_ELEMENTS","client");
+  // Adds the Custom Metrics ("client") section on top of the user's own HUD rows (read when Apple's HUD
+  // loads), plus the fallback's: State Reporters on macOS 27. On macOS 26 the fallback's labels are dropped
+  // while MTL_HUD_ELEMENTS is set (it is an allow-list no element name admits them to), so it is cleared
+  // only when that fallback is the one that will run: the user's element picks give way to Apple's defaults.
+  if(statsEnabled()) {
+    appendEnv("MTL_HUD_EXTRA_ELEMENTS","client");
+    if(@available(macOS 27.0,*)) {
       appendEnv("MTL_HUD_EXTRA_ELEMENTS","statereporter");
       appendEnv("MTL_HUD_STATE_REPORTER_DOMAINS",kDomain);
+    } else if(!customMetricsInstalled() && getenv("MTL_HUD_ELEMENTS")) {
+      unsetenv("MTL_HUD_ELEMENTS");
+      os_log(logger(),"no custom-metric API in this HUD: cleared MTL_HUD_ELEMENTS so label rows can show");
     }
   }
+  os_log(logger(),"loaded in %{public}s; HUD elements %{public}s",getprogname(),getenv("MTL_HUD_ELEMENTS")?:"<Apple default>");
   _dyld_register_func_for_add_image(imageAdded);
 }

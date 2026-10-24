@@ -35,9 +35,9 @@ Xcode builds both files into the app's `Resources`. On launch, MetalHUDmenu copi
 - ANE usage: the highest share of time any PMP `*Floor` channel named `ANE…` spends above its lowest step (`VMIN`, `F1`). Energy Model `ANE` reads 0 on macOS 27 even under load.
 - HUD settings: Apply/Disable save what they put in the login session as `appliedHUDEnvironment` (Disable writes `MTL_HUD_ENABLED=0`). A launcher opened earlier (Steam, Heroic) still carries older values and passes them to its games, so `mhud-run` re-reads `MTL_HUD_*` from the session with `launchctl getenv`, and the library applies the saved snapshot in its constructor, before Apple's HUD reads them (only `MTL_HUD_*` keys; skipped for pin launches, marked `MHUD_HUD_EXPLICIT`, which pass the live settings; sandboxed apps can't read the snapshot).
 - `systemStatsEnabled` is the independent master switch (missing means true for migration). False skips sampling and clears the active state. False at process startup also skips reporter environment additions and registration. The library remains mapped; macOS 27 exposes no reporter unregister API.
-- macOS 27 and later: draws rows through Apple's private custom-metric API, `MTLHUDService` (`insertMetric:after:name:unit:nameColor:valueColor:visualType:options:`, `updateLabelMetric:label:`, `updateMetricColor:nameColor:valueColor:`, `removeMetric:`; colors are `0xAABBGGRR`), the API D3DMetal and DXMT use. Rows appear flush and in catalog order under "Custom Metrics"; only temperatures and memory/thermal pressure are colored. That section needs the HUD's `client` element, which the library adds to `MTL_HUD_EXTRA_ELEMENTS` (so translation layers' own custom rows can show there too). The class, the exact method signature, the other selectors and the `client` element are checked once, two seconds after Apple's HUD loads.
+- Custom metrics (macOS 27, and macOS 26 when its HUD has the API): draws rows through Apple's private custom-metric API, `MTLHUDService` (`insertMetric:after:name:unit:nameColor:valueColor:visualType:options:`, `updateLabelMetric:label:`, `updateMetricColor:nameColor:valueColor:`, `removeMetric:`; colors are `0xAABBGGRR`), the API D3DMetal and DXMT use. Rows appear flush and in catalog order under "Custom Metrics"; only temperatures and memory/thermal pressure are colored. That section needs the HUD's `client` element, which the library adds to `MTL_HUD_EXTRA_ELEMENTS` (so translation layers' own custom rows can show there too). The class, the exact method signature, the other selectors and the `client` element are checked once, two seconds after Apple's HUD loads.
 - Fallback: if any of those checks fail, it reports through the public `SRStateReporter` API (domain `Mac Stats`) instead, with `statereporter` and `Mac Stats` added to `MTL_HUD_EXTRA_ELEMENTS` / `MTL_HUD_STATE_REPORTER_DOMAINS`. Those rows are white, indented under "Mac Stats", and sorted by label, which is why labels share a group prefix.
-- macOS 26: uses the private `_CADeveloperHUDProperties` label calls that DXMT uses. Every call is checked first, so a missing method does nothing. Not yet tested on a macOS 26 machine.
+- macOS 26 fallback: the private `_CADeveloperHUDProperties` label calls that DXMT uses. Every call is checked first, so a missing method does nothing. `MTL_HUD_ELEMENTS` is an allow-list that silently drops these labels (no element name admits them, `MTL_HUD_EXTRA_ELEMENTS` neither), so the constructor clears it, but only when this fallback will run: macOS 26, Mac Stats on, and Apple's HUD library on disk lacks the custom-metric selector (checked before the HUD loads). The app exports the same check as `mhud_custom_metrics()` to explain this in the Mac Stats tab. Reported working on macOS 26.4.1 with `MTL_HUD_ELEMENTS` cleared; the custom-metric route on 26 is untested.
 - Apps that only accept libraries signed by their own developer can't load it.
 
 ## Steam wrapper
@@ -46,9 +46,22 @@ Xcode builds both files into the app's `Resources`. On launch, MetalHUDmenu copi
 
 ## Debugging
 
+- `os_log` subsystem `com.Jfishin.MetalHUDmenu`, category `stats`: one line when the helper loads (process, HUD elements in effect) and one with the route rows go through (`custom-metrics`, `state-reporter`, `labels`). Readable for games opened from the Dock, where stderr goes nowhere: `log stream --predicate 'subsystem == "com.Jfishin.MetalHUDmenu"'`.
 - `MHUD_DEBUG=1` prints when sampling starts and each sample to stderr, marked `published` or `local`.
 - `MHUD_SYSTEM_ELEMENTS=cpuusage,fans` overrides the preference list (handy for testing outside the app).
-- `MHUD_STATE_REPORTER=1` forces the State Reporters fallback, to check it after a macOS update. Debug output says `custom-metrics` or `state-reporter` per sample.
+- `MHUD_STATE_REPORTER=1` skips the custom-metric API: State Reporters on macOS 27, the label fallback (with `MTL_HUD_ELEMENTS` cleared) on macOS 26. Use it to check the fallback after a macOS update. Debug output names the route per sample.
+
+## Testing on macOS 26
+
+Nothing here has run on macOS 26 on our side yet; this is what to check there.
+
+1. In MetalHUDmenu, pick a few HUD elements (for example FPS and Memory), press **Apply**, and leave Mac Stats on with some rows selected.
+2. Run `log stream --predicate 'subsystem == "com.Jfishin.MetalHUDmenu"'`, then start a game (native, or under any connected Wine runtime).
+3. Note the two lines per game process: `loaded in … HUD elements …` and `reporting N rows through …`.
+   - `custom-metrics`, with your picked elements and the rows under **Custom Metrics**: the best case; macOS 26 has the API and picks are kept.
+   - `labels`, with Apple's default elements and the rows below them: the fallback; the Mac Stats tab shows a note about picks.
+   - `custom-metrics` but no rows: the API exists but its `client` section doesn't draw on 26. Run once more with `MHUD_STATE_REPORTER=1` in the game's environment to force the fallback, and report both.
+4. Also worth noting: rows that disappear mid-game (Apple's HUD rebuilt) and whether Rosetta games behave the same.
 
 ## Other launch connections
 

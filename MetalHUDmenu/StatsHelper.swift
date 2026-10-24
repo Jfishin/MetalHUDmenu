@@ -35,6 +35,12 @@ final class StatsHelper: NSObject, ObservableObject {
         }
     }()
 
+    /// False only on macOS 26 without Apple's custom-metric API, where rows need the default HUD elements.
+    static let keepsElementPicks: Bool = {
+        guard let symbol = bundledLibrary.flatMap({ dlsym($0, "mhud_custom_metrics") }) else { return true }
+        return unsafeBitCast(symbol, to: (@convention(c) () -> Bool).self)()
+    }()
+
     @Published var steamStatus = ""
     @Published var busy = false
     @Published var wineRuntimes: [URL] = []
