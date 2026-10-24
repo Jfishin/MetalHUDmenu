@@ -3,7 +3,7 @@ import Foundation
 
 @main struct NativePatchTests {
     static func clang(_ args: [String]) throws {
-        let p = try Process.run(URL(fileURLWithPath: "/usr/bin/xcrun"), arguments: ["clang"] + args)
+        let p = try Process.run(URL(fileURLWithPath: "/usr/bin/xcrun"), arguments: ["--sdk", "macosx", "clang"] + args)
         p.waitUntilExit(); precondition(p.terminationStatus == 0, "clang \(args)")
     }
     static func codesign(_ app: URL) throws {

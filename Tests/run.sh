@@ -11,5 +11,5 @@ xcrun swiftc -module-cache-path "$scratch/modules" -Onone MetalHUDmenu/LaunchCon
 "$scratch/general"
 xcrun swiftc -module-cache-path "$scratch/modules" -Onone MetalHUDmenu/NativePatch.swift Tests/native-patch.swift -o "$scratch/nativepatch"
 "$scratch/nativepatch"
-xcrun clang++ -std=c++17 Tests/stats-math.cpp -o "$scratch/stats-math"
+xcrun --sdk macosx clang++ -std=c++17 Tests/stats-math.cpp -o "$scratch/stats-math"
 "$scratch/stats-math"

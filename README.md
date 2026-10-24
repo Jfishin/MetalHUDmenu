@@ -14,7 +14,8 @@ A tiny macOS utility that configures Apple’s **Metal Performance HUD** system-
 - “Set & forget” for all apps (newly launched apps inherit the settings)
 
 ## Requirements
-- macOS 26 (Tahoe)
+- macOS 26 (Tahoe) or later
+- To build from source: Xcode 26.4 or later (the macOS 26 SDK is enough), then `Tests/run.sh` for the checks.
 
 ## Install
 - Download the release `.zip`, extract, then:

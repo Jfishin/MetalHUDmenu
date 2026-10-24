@@ -6,7 +6,6 @@
 // neither its preferences nor the sensors, but can read those. Without a fresh publisher, a game
 // samples by itself using the selection in MetalHUDmenu's preferences (key "systemStats").
 #import <Foundation/Foundation.h>
-#import <StateReporting/StateReporting.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <mach-o/dyld.h>
@@ -19,6 +18,7 @@
 #include <cstring>
 #include <map>
 #include <string>
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <notify.h>
 #include <sys/stat.h>
@@ -256,15 +256,28 @@ bool fetch(Rows &rows) {
   return true;
 }
 
-// macOS 27+: Apple's HUD shows these under State Reporters, sorted by label.
-API_AVAILABLE(macos(27.0)) void reportModern(NSDictionary *values) {
+// macOS 27+: Apple's HUD shows these under State Reporters, sorted by label. SRStateReporter is looked up
+// at runtime, so the library also builds with SDKs that have no StateReporting framework (Xcode 26).
+void reportModern(NSDictionary *values) {
   static bool live=false;
   // Do not even register a reporter when disabled from process startup.
   if(!values.count && !live) return;
-  SRStateReporter *reporter=[SRStateReporter reporterForDomain:@(kDomain)];
-  if(!values.count) { if(live) [reporter reportTransitionToStateLabel:nil stableMetadata:nil volatileMetadata:nil]; live=false; return; }
-  if(!live) [reporter reportTransitionToStateLabel:@"Live" stableMetadata:nil volatileMetadata:values];
-  else [reporter reportVolatileMetadataUpdate:values];
+  static id reporter=[]() -> id {
+    dlopen("/System/Library/Frameworks/StateReporting.framework/StateReporting",RTLD_LAZY);
+    Class cls=objc_lookUpClass("SRStateReporter");
+    if(!cls||![cls respondsToSelector:@selector(reporterForDomain:)]) return nil;
+    id instance=((id(*)(id,SEL,id))objc_msgSend)(cls,@selector(reporterForDomain:),@(kDomain));
+    for(SEL selector:{@selector(reportTransitionToStateLabel:stableMetadata:volatileMetadata:),@selector(reportVolatileMetadataUpdate:)})
+      if(![instance respondsToSelector:selector]) return nil;
+    return instance;
+  }();
+  if(!reporter) return;
+  auto transition=[](id label,id metadata) {
+    ((void(*)(id,SEL,id,id,id))objc_msgSend)(reporter,@selector(reportTransitionToStateLabel:stableMetadata:volatileMetadata:),label,nil,metadata);
+  };
+  if(!values.count) { if(live) transition(nil,nil); live=false; return; }
+  if(!live) transition(@"Live",values);
+  else ((void(*)(id,SEL,id))objc_msgSend)(reporter,@selector(reportVolatileMetadataUpdate:),values);
   live=true;
 }
 

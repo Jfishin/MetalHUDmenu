@@ -9,7 +9,7 @@ trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$out"
 for a in arm64 x86_64; do
   xcrun --sdk macosx clang++ -arch $a -mmacosx-version-min=26.0 -std=c++17 -O2 -fobjc-arc -dynamiclib \
-    -install_name @rpath/libMHUDStats.dylib -framework Foundation -framework IOKit -weak_framework StateReporting \
+    -install_name @rpath/libMHUDStats.dylib -framework Foundation -framework IOKit \
     "$src/mhud_stats.mm" -o "$tmp/libMHUDStats.$a.dylib"
 done
 xcrun lipo -create "$tmp/libMHUDStats.arm64.dylib" "$tmp/libMHUDStats.x86_64.dylib" -output "$tmp/libMHUDStats.dylib"
